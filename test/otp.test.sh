@@ -1,8 +1,9 @@
 #!/bin/sh
 
-# plain:    hello
-# key:      ABCD       (first 4 bytes in ./test_data/test.txt file
-# cipher:   )'/(*L
+# plain:              hello
+# key:                ABCD       (first 4 bytes in ./test_data/test.txt file)
+# expected cipher:    )'/(*L
+# expected next key:  GH         (last 2 bytes in ./test_data/test.txt file)
 export OUTPUT=`echo "hello" | ./bin/otp ./test/test_data/test.txt`
 export EXPECTED_OUTPUT=")'/(*L"
 export EXPECTED_NEXT_KEY="GH"
@@ -10,12 +11,10 @@ export EXPECTED_NEXT_KEY="GH"
 export NOW=`date +"%Y-%m-%d_%H:%M:%S"`
 if test -f "./test/test_data/test.txt.$NOW.next"; then
   echo "   - PASS - next key file was created"
-  next_key_file_ontent=`cat ./test/test_data/test.txt.$NOW.next`
 else
   echo "   - FAIL - next key file was NOT created!"
   exit -1
 fi
-
 
 export NEXT_KEY=`cat ./test/test_data/test.txt.$NOW.next`
 if [[ "$NEXT_KEY" = "$EXPECTED_NEXT_KEY" ]]; then
