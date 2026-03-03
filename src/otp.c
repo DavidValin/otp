@@ -14,16 +14,67 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/file.h>
-#include <errno.h>
-#include <signal.h>
-#include <unistd.h>
 #include <string.h>
 #include <time.h>
-#include <sys/time.h>
-#include <getopt.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#include <errno.h>
+#include <signal.h>
+#ifndef _WIN32
+#include <sys/file.h>
+#include <unistd.h>
+#endif
+#ifdef _WIN32
+#include <process.h>
+#endif
+
+#ifndef _WIN32
+#define O_BINARY 0
+#endif
+#ifdef _WIN32
+#include <io.h>
+#include <direct.h>
+#include <windows.h>
+/* Map POSIX flags to MSVC equivalents */
+#ifndef O_RDONLY
+#define O_RDONLY _O_RDONLY
+#endif
+#ifndef O_WRONLY
+#define O_WRONLY _O_WRONLY
+#endif
+#ifndef O_RDWR
+#define O_RDWR _O_RDWR
+#endif
+#ifndef O_CREAT
+#define O_CREAT _O_CREAT
+#endif
+#ifndef O_EXCL
+#define O_EXCL _O_EXCL
+#endif
+#ifndef O_APPEND
+#define O_APPEND _O_APPEND
+#endif
+#ifndef O_BINARY
+#define O_BINARY _O_BINARY
+#endif
+/* Define flock as a no-op on Windows */
+static inline int flock(int fd, int lock) { return 0; }
+/* Map fstat to _fstat */
+/* Map struct stat to _stat */
+#ifndef _MSC_VER
+struct stat;
+#endif
+/* Map localtime to localtime_s for thread safety */
+#define close _close
+#define open _open
+#define fstat _fstat
+#define getpid _getpid
+#define LOCK_EX 0
+#endif
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 
 int main(int argc, char *argv[]) {
   optind = 1;
@@ -72,7 +123,7 @@ int main(int argc, char *argv[]) {
     char fname[256];
     // encryption_part_a
     snprintf(fname, sizeof fname, "encryption_%s.txt", part_a);
-    int fd = open(fname, O_WRONLY|O_CREAT|O_EXCL, 0600);
+    int fd = open(fname, O_WRONLY|O_CREAT|O_EXCL|O_BINARY, 0600);
     if (fd < 0) {fprintf(stderr,"Error creating %s: %s\n", fname, strerror(errno)); free(buf1); free(buf2); return 1;}
     FILE *f = fdopen(fd, "wb");
     if (!f) {fprintf(stderr,"Error fdopen %s\n", fname); close(fd); free(buf1); free(buf2); return 1;}
@@ -80,7 +131,7 @@ int main(int argc, char *argv[]) {
     fclose(f);
     // decryption_part_a
     snprintf(fname, sizeof fname, "decryption_%s.txt", part_a);
-    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL, 0600);
+    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL|O_BINARY, 0600);
     if (fd < 0) {fprintf(stderr,"Error creating %s: %s\n", fname, strerror(errno)); free(buf1); free(buf2); return 1;}
     f = fdopen(fd, "wb");
     if (!f) {fprintf(stderr,"Error fdopen %s\n", fname); close(fd); free(buf1); free(buf2); return 1;}
@@ -88,7 +139,7 @@ int main(int argc, char *argv[]) {
     fclose(f);
     // encryption_part_b
     snprintf(fname, sizeof fname, "encryption_%s.txt", part_b);
-    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL, 0600);
+    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL|O_BINARY, 0600);
     if (fd < 0) {fprintf(stderr,"Error creating %s: %s\n", fname, strerror(errno)); free(buf1); free(buf2); return 1;}
     f = fdopen(fd, "wb");
     if (!f) {fprintf(stderr,"Error fdopen %s\n", fname); close(fd); free(buf1); free(buf2); return 1;}
@@ -96,7 +147,7 @@ int main(int argc, char *argv[]) {
     fclose(f);
     // decryption_part_b
     snprintf(fname, sizeof fname, "decryption_%s.txt", part_b);
-    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL, 0600);
+    fd = open(fname, O_WRONLY|O_CREAT|O_EXCL|O_BINARY, 0600);
     if (fd < 0) {fprintf(stderr,"Error creating %s: %s\n", fname, strerror(errno)); free(buf1); free(buf2); return 1;}
     f = fdopen(fd, "wb");
     if (!f) {fprintf(stderr,"Error fdopen %s\n", fname); close(fd); free(buf1); free(buf2); return 1;}
@@ -113,21 +164,27 @@ int main(int argc, char *argv[]) {
   /* Build output name safely with high‑resolution timestamp and random suffix */
   char outfileunused[256];
   time_t t = time(NULL);
-  struct tm tm_struct = *localtime(&t);
+  struct tm tm_struct;
+#ifdef _WIN32
+  localtime_s(&tm_struct, &t);
+#else
+  localtime_r(&t, &tm_struct);
+#endif
+
   snprintf(outfileunused, sizeof outfileunused,
     "%s.%04d-%02d-%02d_%02d-%02d-%02d.next",
     argv[optind],
     tm_struct.tm_year + 1900, tm_struct.tm_mon + 1, tm_struct.tm_mday,
     tm_struct.tm_hour, tm_struct.tm_min, tm_struct.tm_sec);
   /* Ensure unique output file atomically (O_CREAT|O_EXCL) */
-  int out_fd = open(outfileunused, O_WRONLY|O_CREAT|O_EXCL, 0600);
+  int out_fd = open(outfileunused, O_WRONLY|O_CREAT|O_EXCL|O_BINARY, 0600);
   if (out_fd < 0) {
     fprintf(stderr, "Error creating output file %s: %s\\n", outfileunused, strerror(errno));
     return 1;
   }
   FILE *unused = fdopen(out_fd, "wb");
   /* Open and lock key file */
-  int key_fd = open(argv[optind], O_RDONLY);
+  int key_fd = open(argv[optind], O_RDONLY|O_BINARY);
   if (key_fd < 0) {
     fprintf(stderr, "Error opening key file %s: %s\\n", argv[optind], strerror(errno));
     close(out_fd);
