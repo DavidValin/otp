@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 # plain:              16ag
 # key:                abcdefghijklmn   (first 4 bytes in ./test_data/test.txt file)
@@ -8,9 +8,9 @@ export PLAIN='16ag'
 export COMPUTED_CIPHER=`printf '%s' $PLAIN | ./bin/otp ./test/test_data/test.txt`
 export EXPECTED_CIPHER='PT'
 export EXPECTED_NEXT_KEY="efghijklmn"
-export NOW=`date +"%Y-%m-%d_%H:%M:%S"`
+export NOW=`date +"%Y-%m-%d_%H-%M-%S"`
 
-if [[ "$COMPUTED_CIPHER" = "$EXPECTED_CIPHER" ]]; then
+if [ "$COMPUTED_CIPHER" = "$EXPECTED_CIPHER" ]; then
   echo "   - PASS - output is correct"
 else
   echo "   ! FAIL : Expected $EXPECTED_CIPHER but got $COMPUTED_CIPHER"
@@ -25,7 +25,7 @@ else
 fi
 
 export NEXT_KEY=`cat ./test/test_data/test.txt.$NOW.next`
-if [[ "$NEXT_KEY" = "$EXPECTED_NEXT_KEY" ]]; then
+if [ "$NEXT_KEY" = "$EXPECTED_NEXT_KEY" ]; then
   echo "   - PASS - next key file has correct key (content)"
 else
   echo "   ! FAIL : next key file has WRONG key (content), expected '$EXPECTED_NEXT_KEY' but got '$NEXT_KEY'"
