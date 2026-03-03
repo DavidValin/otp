@@ -11,10 +11,19 @@ When using one time pad algorithm, it is critical to remember to never reuse the
 
 ### Install
 
-* Build and test: `make`
-* Install: `sudo make install`
+**Build and test**
+```
+make
+```
 
-#### How to use it
+**Install**
+```
+sudo make install
+```
+
+musl supported, see Makefile
+
+#### How to use
 
 * Create a key file: `printf '%s' 'mysupersecretkey' > key.txt`
 * Encrypt using key: `printf '%s' 'topsecretmsg' | otp key.txt > cipher.txt`
@@ -22,7 +31,7 @@ When using one time pad algorithm, it is critical to remember to never reuse the
 
 #### Next key
 
-Everytime you run the command it will create a new file with the same name as the key file ending with ".next". You should never reuse keys once they are used (one time pad algorithm requirements), therefore you should remove the original key file and use the new key file generated next time.
+Everytime you run the command it will create a new file with the same name as the key file ending with ".next".
 
 #### True Random Number generator
 
