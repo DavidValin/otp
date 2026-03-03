@@ -6,7 +6,7 @@
 # expected next key:  efghijklmn      (last 4 bytes in ./test_data/test.txt file)
 export PLAIN='16ag'
 export COMPUTED_CIPHER=`printf '%s' $PLAIN | ./bin/otp ./test/test_data/test.txt`
-export EXPECTED_CIPHER=$'PT\x02\x03'
+export EXPECTED_CIPHER=$(printf 'PT\x02\x03')
 export EXPECTED_NEXT_KEY="efghijklmn"
 export NOW=`date +"%Y-%m-%d_%H-%M-%S"`
 
@@ -42,7 +42,7 @@ fi
 rm ./test/test_data/test.txt.$NOW.next
 
 export COMPUTED_PLAN_FROM_CIPHER=`printf '%s' $COMPUTED_CIPHER | ./bin/otp ./test/test_data/test.txt`
-if [[ "$COMPUTED_PLAN_FROM_CIPHER" = "$PLAIN" ]]; then
+if [ "$COMPUTED_PLAN_FROM_CIPHER" = "$PLAIN" ]; then
   echo "     - PASS - decryption (content) is correct"
 else
   echo "     ! FAIL - decryption (content) is incorrect, expected '$PLAIN' but got '$COMPUTED_PLAN_FROM_CIPHER'"
