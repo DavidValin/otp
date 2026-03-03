@@ -1,19 +1,19 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 # plain:              16ag
 # key:                abcdefghijklmn   (first 4 bytes in ./test_data/test.txt file)
 # expected cipher:    PT
 # expected next key:  efghijklmn       (last 4 bytes in ./test_data/test.txt file)
 export PLAIN='16ag'
-export OUTPUT=`echo -n $PLAIN | ./bin/otp ./test/test_data/test.txt`
-export EXPECTED_OUTPUT='PT'
+export COMPUTED_CIPHER=`printf '%s' $PLAIN | ./bin/otp ./test/test_data/test.txt`
+export EXPECTED_CIPHER='PT'
 export EXPECTED_NEXT_KEY="efghijklmn"
 export NOW=`date +"%Y-%m-%d_%H:%M:%S"`
 
-if [[ "$OUTPUT" = "$EXPECTED_OUTPUT" ]]; then
+if [[ "$COMPUTED_CIPHER" = "$EXPECTED_CIPHER" ]]; then
   echo "   - PASS - output is correct"
 else
-  echo "   ! FAIL : Expected $EXPECTED_OUTPUT but got $OUTPUT"
+  echo "   ! FAIL : Expected $EXPECTED_CIPHER but got $COMPUTED_CIPHER"
   exit -1
 fi
 
@@ -34,11 +34,11 @@ fi
 
 rm ./test/test_data/test.txt.$NOW.next
 
-export ORIGINAL=`echo -n $OUTPUT | ./bin/otp ./test/test_data/test.txt`
-if [[ "$ORIGINAL" = "$PLAIN" ]]; then
+export COMPUTED_PLAN_FROM_CIPHER=`printf '%s' $COMPUTED_CIPHER | ./bin/otp ./test/test_data/test.txt`
+if [[ "$COMPUTED_PLAN_FROM_CIPHER" = "$PLAIN" ]]; then
   echo "   - PASS - decryption (content) is correct"
 else
-  echo "   ! FAIL : decryption (content) is incorrect, expected '$PLAIN' but got '$ORIGINAL'"
+  echo "   ! FAIL : decryption (content) is incorrect, expected '$PLAIN' but got '$COMPUTED_PLAN_FROM_CIPHER'"
   exit -1
 fi
 
