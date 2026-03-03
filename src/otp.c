@@ -10,15 +10,17 @@ int min( int a, int b) {if (a<b) return a; return b;}
 int main(int argc, char *argv[]) {
   unsigned char instructions[] = "\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, ending with \".next\".\n\nUses:\n  encrypt\techo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  decrypt\tcat cipher.txt | otp KEY_FILE.txt > plain.txt\n\n";
   if (argc == 1) {
-    puts(instructions);
+    puts((char*)instructions);
     exit(0);
   }
 
   char outfileunused[1024];
-  sprintf(outfileunused, argv[optind]);
+  strncpy(outfileunused, argv[optind], sizeof(outfileunused)-1);
+  outfileunused[sizeof(outfileunused)-1] = '\0';
   time_t t = time(NULL);
   struct tm tm = *localtime(&t);
-  sprintf(outfileunused+strlen(argv[optind]), ".%d-%02d-%02d_%02d:%02d:%02d.next", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  size_t base_len = strlen(argv[optind]);
+  snprintf(outfileunused + base_len, sizeof(outfileunused) - base_len, ".%d-%02d-%02d_%02d:%02d:%02d.next", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
 
   struct stat buffer;
   if (stat (outfileunused, &buffer) == 0) {
