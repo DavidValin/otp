@@ -1,83 +1,141 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <errno.h>
+#include <signal.h>
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
-
-int min( int a, int b) {if (a<b) return a; return b;}
+#include <sys/time.h>
+#include <getopt.h>
 
 int main(int argc, char *argv[]) {
-  unsigned char instructions[] = "\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, ending with \".next\".\n\nUses:\n  encrypt\techo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  decrypt\tcat cipher.txt | otp KEY_FILE.txt > plain.txt\n\n";
+  optind = 1;
+  srand((unsigned)time(NULL) ^ getpid());
+  unsigned char instructions[] =
+    "\nThis program takes stdin, xor's it with a key file, outputs the result to stdout "
+    "and creates a new file containing the part of the key file that was not used, "
+    "ending with \".next\".\n\nUses:\n  encrypt\techo \"plain\" | otp KEY_FILE.txt > cipher.txt\n"
+    "  decrypt\tcat cipher.txt | otp KEY_FILE.txt > plain.txt\n\n";
+
   if (argc == 1) {
     puts((char*)instructions);
-    exit(0);
+    return 0;
   }
 
-  char outfileunused[1024];
-  strncpy(outfileunused, argv[optind], sizeof(outfileunused)-1);
-  outfileunused[sizeof(outfileunused)-1] = '\0';
+  /* Build output name safely with high‑resolution timestamp and random suffix */
+  char outfileunused[256];
   time_t t = time(NULL);
-  struct tm tm = *localtime(&t);
-  size_t base_len = strlen(argv[optind]);
-  snprintf(outfileunused + base_len, sizeof(outfileunused) - base_len, ".%d-%02d-%02d_%02d:%02d:%02d.next", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+  struct tm tm_struct = *localtime(&t);
+  snprintf(outfileunused, sizeof outfileunused,
+    "%s.%04d-%02d-%02d_%02d-%02d-%02d.next",
+    argv[optind],
+    tm_struct.tm_year + 1900, tm_struct.tm_mon + 1, tm_struct.tm_mday,
+    tm_struct.tm_hour, tm_struct.tm_min, tm_struct.tm_sec);
 
-  struct stat buffer;
-  if (stat (outfileunused, &buffer) == 0) {
-    fputs("\n  A file named %s already exists, please remove it\n\n", stderr);
-    return -1;
+  /* Ensure unique output file atomically (O_CREAT|O_EXCL) */
+  int out_fd = open(outfileunused, O_WRONLY|O_CREAT|O_EXCL, 0600);
+  if (out_fd < 0) {
+    fprintf(stderr, "Error creating output file %s: %s\n", outfileunused, strerror(errno));
+    return 1;
+  }
+  FILE *unused = fdopen(out_fd, "wb");
+
+  /* Open and lock key file */
+  int key_fd = open(argv[optind], O_RDONLY);
+  if (key_fd < 0) {
+    fprintf(stderr, "Error opening key file %s: %s\n", argv[optind], strerror(errno));
+    close(out_fd);
+    return 1;
+  }
+  if (flock(key_fd, LOCK_EX) < 0) {
+    fprintf(stderr, "Error locking key file %s: %s\n", argv[optind], strerror(errno));
+    close(key_fd); close(out_fd);
+    return 1;
+  }
+  FILE *infile = fdopen(key_fd, "rb");
+
+  /* Determine key file size */
+  struct stat ks;
+  if (fstat(key_fd, &ks) < 0) {
+    fprintf(stderr, "Error statting key file %s: %s\n", argv[optind], strerror(errno));
+    fclose(infile); fclose(unused);
+    return 1;
+  }
+  if (!S_ISREG(ks.st_mode)) {
+    fprintf(stderr, "%s is not a regular file\n", argv[optind]);
+    fclose(infile); fclose(unused);
+    return 1;
+  }
+  size_t key_size = ks.st_size;
+  if (key_size == 0) {
+    fprintf(stderr, "Key file %s is empty\n", argv[optind]);
+    fclose(infile); fclose(unused);
+    return 1;
   }
 
-  FILE *infile;
-	FILE *unused_infile_file_part;
-  unsigned char filebuffer;
-  unsigned char stdinbuffer;
-  int nreadfile, nreadfile2, nreadstdin;
-  int i;
-
-  infile=fopen(argv[optind], "r");
-  unused_infile_file_part = fopen(outfileunused, "w");
-
-  if (infile == NULL) {
-    fputs("Error opening input key file, check that it exist\n", stderr);
-    return -1;
+  /* Read key into memory */
+  unsigned char *keybuf = malloc(key_size);
+  if (!keybuf) {
+    fprintf(stderr, "Memory allocation failed\n");
+    fclose(infile); fclose(unused);
+    return 1;
   }
-  if (unused_infile_file_part == NULL)  {
-    fputs("Error opening next input key file\n", stderr);
-    return -1;
+  if (fread(keybuf, 1, key_size, infile) != key_size) {
+    fprintf(stderr, "Error reading key file %s\n", argv[optind]);
+    free(keybuf); fclose(infile); fclose(unused);
+    return 1;
   }
 
-  while(1) {
-    nreadstdin=fread(&stdinbuffer, 1, sizeof(unsigned char), stdin);
-    if (nreadstdin==1) {
-      nreadfile=fread(&filebuffer, 1, sizeof(unsigned char), infile);
-      if (nreadfile==1) {
-        stdinbuffer^=filebuffer;
-        fwrite(&stdinbuffer, 1, sizeof(unsigned char), stdout);
-        fflush(stdout);
-        continue;
-      } else {
-        printf("\n Error! Key file not as long as stdin input.\n");
-        return -1;
-      }
-    } else {
-      break;
+  /* Reset infile to start for potential further use */
+  fseek(infile, 0, SEEK_SET);
+
+  /* Handle empty stdin early */
+  int first = fgetc(stdin);
+  if (first == EOF) {
+    fprintf(stderr, "No input provided; producing empty output.\n");
+    /* Write empty .next file and exit */
+    fclose(infile); free(keybuf);
+    fclose(unused);
+    return 0;
+  }
+
+  /* Put the byte back for normal processing */
+  ungetc(first, stdin);
+
+  /* Ignore SIGPIPE to handle closed pipes gracefully */
+  signal(SIGPIPE, SIG_IGN);
+
+  unsigned char outbyte;
+  size_t used = 0;
+  while (fread(&outbyte, 1, 1, stdin) == 1) {
+    if (used >= key_size) {
+      fprintf(stderr, "Error: key file %s shorter than input.\n", argv[optind]);
+      free(keybuf); fclose(infile); fclose(unused);
+      return 1;
+    }
+    /* Encrypt current byte using key */
+    outbyte ^= keybuf[used];
+    if (fwrite(&outbyte, 1, 1, stdout) != 1) {
+      fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
+      free(keybuf); fclose(infile); fclose(unused);
+      return 1;
+    }
+    used++;
+  }
+
+  /* Write remaining key bytes to the .next key file */
+  if (used < key_size) {
+    if (fwrite(keybuf + used, 1, key_size - used, unused) != key_size - used) {
+      fprintf(stderr, "Error writing remainder to %s: %s\n", outfileunused, strerror(errno));
+      free(keybuf); fclose(infile); fclose(unused);
+      return 1;
     }
   }
 
-  // produce new file excluding the part of the key that was used
-  while(1) {
-    nreadfile2=fread(&filebuffer, 1, sizeof(unsigned char), infile);
-    if (nreadfile2==1) {
-      fwrite(&filebuffer, 1, sizeof(unsigned char), unused_infile_file_part);
-      fflush(unused_infile_file_part);
-    } else {
-      break;
-    }
-  }
-
-  fclose(stdin);
-  fclose(stdout);
-  fclose(infile);
-  fclose(unused_infile_file_part);
+  fflush(unused);
+  free(keybuf); fclose(infile); fclose(unused);
+  return 0;
 }
