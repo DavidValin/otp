@@ -1,3 +1,11 @@
+/*
+   otp v1.0.2
+    simple but effective one time pad encryption / decryption command that works with stdin/stdout
+
+   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com
+   License: Apache 2.0
+   February 2 2026
+*/
 #include <stdlib.h>
 #include <stdio.h>
 #include <sys/stat.h>
