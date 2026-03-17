@@ -1,0 +1,57 @@
+# OTP manual page
+
+.TH OTP 1 "2026-03-18" "OTP v1.0.4" "User Commands"
+
+.SH NAME
+otp \- simple one‑time pad encryption/decryption utility
+
+.SH SYNOPSIS
+.B otp
+[options] <keyfile>
+.br
+.B otp
+[-h | --help]
+.br
+.B otp
+[-nk | --new-key-pair] <size_in_MB> <part_a_name> <part_b_name>
+
+.SH DESCRIPTION
+This program takes data from standard input, XORs it with a key file, and writes the result to standard output.  After processing it writes a new file containing the part of the key file that was not used, ending with ``.next``.  This ensures the key cannot be reused.  The key file must be a binary file containing random data; after each use the unused portion is moved to a new file for the next run.
+
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Display this help message and exit.
+
+.TP
+.B \-nk, \-\-new-key-pair
+Generate a new key pair.  The program expects two key files for encryption and decryption.  The key material is read from standard input: the first half is written to an encryption file named ``encryption_<part_a_name>.txt``; the second half to ``decryption_<part_a_name>.txt``; and so on for ``part_b_name``.  The first argument is the size in megabytes (e.g., ``5`` for 5 MiB).  Example: cat /dev/urandom | otp --new-key-pair 5 partA partB
+
+.SH USAGE
+To encrypt:
+.PP
+.B echo "plain text" | otp key.txt > cipher.txt
+.PP
+To decrypt:
+.PP
+.B cat cipher.txt | otp key.txt > plain.txt
+.PP
+After each run, the file ``key.txt.next`` will contain the unused key bytes.
+
+.SH NEXT KEY
+Every time you run the command it will create a new file with the same name as the key file ending with ``.next``.
+
+.SH NEW KEY PAIR GENERATION
+Use the \fB-nk\fP or \fB--new-key-pair\fP flag to generate a new key pair from a source of randomness.
+Example:
+.B cat /dev/urandom | otp --new-key-pair 1 alice bob
+
+.SH TRUE RANDOM KEY GENERATOR
+Only a true random key makes this algorithm unbreakable. To generate a true random key consider
+.B https://www.crowdsupply.com/leetronics/infinite-noise-trng
+
+.SH SEE ALSO
+openssl(1), gpg(1)
+
+.SH AUTHOR
+David Valin <hola@davidvalin.com>
