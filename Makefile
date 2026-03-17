@@ -42,6 +42,9 @@ install:
 	fi
 	@echo " - Installed! You can use \"otp\" now"
 	@echo
+	@mkdir -p /usr/local/share/man/man1
+	@cp otp.1 /usr/local/share/man/man1/otp.1
+	@echo " - Man page installed to /usr/local/share/man/man1/otp.1"
 
 # Static musl build only for Unix-like systems
 ifneq ($(OS),Windows_NT)
@@ -61,5 +64,10 @@ install-musl:
 	@echo " - Installing musl binary..."
 	@mv ./bin/otp /usr/local/bin/otp-musl
 	@echo " - Installed! You can use \"otp-musl\" now"
+	@echo
+	@mkdir -p /usr/local/share/man/man1
+	@cp otp.1 /usr/local/share/man/man1/otp.1
+	@echo " - Man page installed to /usr/local/share/man/man1/otp.1"
+	@echo
 	@echo
 endif
