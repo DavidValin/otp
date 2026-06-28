@@ -15,32 +15,34 @@
 
 #define MAX_CONTACTS 10000
 #define MAX_NAME_LENGTH 256
-#define MAX_KEY_SIZE 1099511627776ULL  // 1TB max key size per contact
-#define MAX_MESSAGE_LENGTH 1073741824ULL  // 1GB max message length
+#define MAX_KEY_SIZE 1099511627776ULL    // 1TB max key size per contact
+#define MAX_MESSAGE_LENGTH 1073741824ULL // 1GB max message length
 #define MIN_RETRY_COUNT 0
 #define MAX_RETRY_COUNT 25000
 
-typedef struct {
-    char Name[MAX_NAME_LENGTH];
-    char EncryptionKeyPath[512];    // Path to encryption key file
-    size_t EncryptionKeySize;       // Total size of encryption key file
-    size_t EncryptionKeyOffset;     // How many bytes consumed
-    size_t EncryptedSequence;       // Number of messages encrypted
-    char DecryptionKeyPath[512];    // Path to decryption key file
-    size_t DecryptionKeySize;       // Total size of decryption key file
-    size_t DecryptionKeyOffset;     // How many bytes consumed
-    size_t DecryptedSequence;       // Number of messages decrypted
-    unsigned char *LastMessageSent; // Keep in memory (much smaller than keys)
-    size_t LastMessageSentSize;
-    int RetryCount;
-    time_t LastMessageSentAt;
-    time_t LastMessageReceivedAt;
+typedef struct
+{
+  char Name[MAX_NAME_LENGTH];
+  char EncryptionKeyPath[512];    // Path to encryption key file
+  size_t EncryptionKeySize;       // Total size of encryption key file
+  size_t EncryptionKeyOffset;     // How many bytes consumed
+  size_t EncryptedSequence;       // Number of messages encrypted
+  char DecryptionKeyPath[512];    // Path to decryption key file
+  size_t DecryptionKeySize;       // Total size of decryption key file
+  size_t DecryptionKeyOffset;     // How many bytes consumed
+  size_t DecryptedSequence;       // Number of messages decrypted
+  unsigned char *LastMessageSent; // Keep in memory (much smaller than keys)
+  size_t LastMessageSentSize;
+  int RetryCount;
+  time_t LastMessageSentAt;
+  time_t LastMessageReceivedAt;
 } Contact;
 
-typedef struct {
-    Contact contacts[MAX_CONTACTS];
-    int count;
-    char filepath[512];
+typedef struct
+{
+  Contact contacts[MAX_CONTACTS];
+  int count;
+  char filepath[512];
 } Keychain;
 
 // Global keychain instance
@@ -63,7 +65,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 
 // Helper functions
-Contact* find_contact(const char *name);
+Contact *find_contact(const char *name);
 void init_keychain(void);
 void cleanup_keychain(void);
 
