@@ -53,6 +53,7 @@ otp --help
 ```
 
 Common operations:
+
 - **Add contact without keys:** `otp --add-contact <name>` or `otp -ac <name>`
 - **Add contact with keys:** `otp --add-contact <name> <enc_key> <dec_key>`
 - **List contacts:** `otp --list-contacts` or `otp -lc`
@@ -62,12 +63,15 @@ Common operations:
 
 #### Keychain Features
 
+- **Streaming architecture:** Keys stored in `.keychain/` directory, read in 4MB chunks - supports keys up to 1TB without loading into RAM
 - **Automatic key management:** Keys are consumed automatically; no manual .next file handling
-- **Metadata tracking:** Sequence numbers, offsets, and timestamps tracked for each contact
-- **Perfect forward secrecy:** Used key portions are removed; past messages can't be decrypted if keychain is compromised
+- **Metadata tracking:** Sequence numbers, offsets, and timestamps tracked for each contact in `keychain.txt`
+- **Perfect forward secrecy:** Key consumption tracked via offsets; past messages can't be decrypted if offset information is lost
 - **Binary safe:** Handles binary cipher text correctly
 - **Security:** Keys are masked (displayed as *******) when viewing contact info
-- **Persistence:** All contact data stored in `keychain.txt` file
+- **File structure:**
+  - `keychain.txt` - Contact metadata (names, paths, offsets, sequences)
+  - `.keychain/` - Directory containing actual key files (`<contact>_enc.key`, `<contact>_dec.key`)
 
 ## How to use (encryption / decryption)
 
@@ -85,7 +89,7 @@ Everytime you run the command it will create a new file with the same name as th
 
 ### Using the Keychain System
 
-The keychain system provides a convenient way to manage multiple contacts and their encryption/decryption keys. Keys are stored in a `keychain.txt` file and automatically consumed as you encrypt/decrypt messages.
+The keychain system provides a convenient way to manage multiple contacts and their encryption/decryption keys. Contact metadata is stored in `keychain.txt`, while actual key files are stored in the `.keychain/` directory. Keys are automatically consumed via offset tracking as you encrypt/decrypt messages, supporting extremely large keys (up to 1TB) through streaming.
 
 #### Setup Keychain
 
@@ -163,8 +167,12 @@ otp --show-contact bob
 
 #### Important Notes
 
-- **Key consumption:** Both key file and keychain methods consume keys permanently
-- **Keychain location:** The `keychain.txt` file is stored in the current directory
-- **File permissions:** Set appropriate permissions on `keychain.txt` (e.g., `chmod 600 keychain.txt`)
-- **Backup:** Back up your keychain.txt securely if needed
+- **Key consumption:** Both key file and keychain methods track key consumption via offsets
+- **Keychain location:** `keychain.txt` file and `.keychain/` directory are in the current directory
+- **File permissions:** Set appropriate permissions:
+  - `chmod 600 keychain.txt`
+  - `chmod 700 .keychain/`
+  - `chmod 600 .keychain/*`
+- **Backup:** Back up both `keychain.txt` and `.keychain/` directory securely if needed
 - **Key exhaustion:** Monitor key sizes with `--show-contact` to know when to generate new keys
+- **Large keys:** Supports keys up to 1TB through streaming architecture - no RAM limitations

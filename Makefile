@@ -12,7 +12,8 @@ ifeq ($(OS),Windows_NT)
 else
   CC := gcc
   BIN_EXT :=
-  BUILD_FLAGS := -O2 -Wall
+  # Enable Large File Support (LFS) for files >2GB on 32-bit systems
+  BUILD_FLAGS := -O2 -Wall -D_FILE_OFFSET_BITS=64
 endif
 
 BIN := bin/otp$(BIN_EXT)
@@ -53,7 +54,7 @@ musl:
 	@echo
 	@echo " - Building musl static binary..."
 	@mkdir -p bin
-	@musl-gcc -static -o $(BIN) src/otp.c src/keychain.c
+	@musl-gcc -static -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c
 	@echo " - Built!"
 	@echo " - Testing..."
 	@bash test/otp.test.sh
