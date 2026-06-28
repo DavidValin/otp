@@ -18,16 +18,6 @@ sudo make install
 
 * musl supported, see Makefile
 
-## How to use
-
-* Create a key file: `printf '%s' 'mysupersecretkey' > key.txt`
-* Encrypt using key: `printf '%s' 'topsecretmsg' | otp key.txt > cipher.txt`
-* Decrypt using key: `cat cipher.txt | otp key.txt > plain.txt`
-
-#### Next key
-
-Everytime you run the command it will create a new file with the same name as the key file ending with ".next".
-
 ## New key pair generation
 
 Use the `-nk` or `--new-key-pair` flag to generate a new key pair from a source of randomness. This is useful when you need to create two complementary key files that will be split between parties. Each party receives 2 keys, an encryption key (used for sending messages) and a decryption key (used to receive messages) ensuring that what a party encrypts the other can decrypt and vice versa.
@@ -53,3 +43,128 @@ decryption_alice.txt
 
 Only a true random key makes this algorithm unbreakable.
 To generate a true random key consider [Infinite Noise TRNG](https://www.crowdsupply.com/leetronics/infinite-noise-trng).
+
+
+## Keychain Management Commands
+
+List all keychain commands:
+```bash
+otp --help
+```
+
+Common operations:
+- **Add contact without keys:** `otp --add-contact <name>` or `otp -ac <name>`
+- **Add contact with keys:** `otp --add-contact <name> <enc_key> <dec_key>`
+- **List contacts:** `otp --list-contacts` or `otp -lc`
+- **Show contact details:** `otp --show-contact <name>` or `otp -sc <name>`
+- **Remove contact:** `otp --remove-contact <name>` or `otp -rc <name>`
+- **Check if contact exists:** `otp --has-contact <name>` or `otp -hc <name>`
+
+#### Keychain Features
+
+- **Automatic key management:** Keys are consumed automatically; no manual .next file handling
+- **Metadata tracking:** Sequence numbers, offsets, and timestamps tracked for each contact
+- **Perfect forward secrecy:** Used key portions are removed; past messages can't be decrypted if keychain is compromised
+- **Binary safe:** Handles binary cipher text correctly
+- **Security:** Keys are masked (displayed as *******) when viewing contact info
+- **Persistence:** All contact data stored in `keychain.txt` file
+
+## How to use (encryption / decryption)
+
+There are two ways to use OTP: directly with key files, or with the keychain system for managing multiple contacts.
+
+### Using Key Files Directly
+
+* Create a key file: `printf '%s' 'mysupersecretkey' > key.txt`
+* Encrypt using key: `printf '%s' 'topsecretmsg' | otp key.txt > cipher.txt`
+* Decrypt using key: `cat cipher.txt | otp key.txt > plain.txt`
+
+#### Next key
+
+Everytime you run the command it will create a new file with the same name as the key file ending with ".next".
+
+### Using the Keychain System
+
+The keychain system provides a convenient way to manage multiple contacts and their encryption/decryption keys. Keys are stored in a `keychain.txt` file and automatically consumed as you encrypt/decrypt messages.
+
+#### Setup Keychain
+
+1. **Generate a key pair** (on a secure machine):
+   ```bash
+   cat /dev/urandom | otp --new-key-pair 1 alice bob
+   ```
+
+2. **Distribute keys securely** (via encrypted USB, in-person, etc.):
+   - Alice receives: `encryption_alice.txt` and `decryption_alice.txt`
+   - Bob receives: `encryption_bob.txt` and `decryption_bob.txt`
+
+3. **Add contacts to keychain**:
+   
+   On Alice's machine:
+   ```bash
+   otp --add-contact bob encryption_alice.txt decryption_alice.txt
+   ```
+   
+   On Bob's machine:
+   ```bash
+   otp --add-contact alice encryption_bob.txt decryption_bob.txt
+   ```
+
+#### Encrypt and Decrypt with Keychain
+
+**Alice sends encrypted message to Bob:**
+```bash
+echo "Hello Bob!" | otp -c bob --encrypt > message.bin
+```
+
+**Bob decrypts Alice's message:**
+```bash
+cat message.bin | otp -c alice --decrypt
+# Output: Hello Bob!
+```
+
+**Bob sends encrypted reply to Alice:**
+```bash
+echo "Hi Alice!" | otp -c alice --encrypt > reply.bin
+```
+
+**Alice decrypts Bob's reply:**
+```bash
+cat reply.bin | otp -c bob --decrypt
+# Output: Hi Alice!
+```
+
+#### Example Workflow
+
+Complete example of secure communication:
+
+```bash
+# 1. Generate 1MB key pair
+cat /dev/urandom | otp --new-key-pair 1 alice bob
+
+# 2. Alice adds Bob to her keychain
+otp --add-contact bob encryption_alice.txt decryption_alice.txt
+
+# 3. Bob adds Alice to his keychain (on his machine)
+otp --add-contact alice encryption_bob.txt decryption_bob.txt
+
+# 4. Alice encrypts and sends
+echo "Secret message" | otp -c bob --encrypt > msg1.bin
+# Transfer msg1.bin to Bob via any channel (it's encrypted)
+
+# 5. Bob decrypts (on his machine)
+cat msg1.bin | otp -c alice --decrypt
+# Output: Secret message
+
+# 6. Check contact status
+otp --show-contact bob
+# Shows: key sizes, offsets, sequence number, timestamps, etc.
+```
+
+#### Important Notes
+
+- **Key consumption:** Both key file and keychain methods consume keys permanently
+- **Keychain location:** The `keychain.txt` file is stored in the current directory
+- **File permissions:** Set appropriate permissions on `keychain.txt` (e.g., `chmod 600 keychain.txt`)
+- **Backup:** Back up your keychain.txt securely if needed
+- **Key exhaustion:** Monitor key sizes with `--show-contact` to know when to generate new keys

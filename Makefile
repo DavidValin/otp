@@ -22,13 +22,14 @@ build:
 	@echo " - Building..."
 	@mkdir -p bin
 	@if [ "$(OS)" = "Windows_NT" ]; then \
-		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c src/keychain.c || exit 1; \
 	else \
-		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c src/keychain.c || exit 1; \
 	fi
 	@echo " - Built!"
 	@echo " - Testing..."
-	@sh test/otp.test.sh
+	@bash test/otp.test.sh
+	@bash test/keychain.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -52,10 +53,11 @@ musl:
 	@echo
 	@echo " - Building musl static binary..."
 	@mkdir -p bin
-	@musl-gcc -static -o $(BIN) src/otp.c
+	@musl-gcc -static -o $(BIN) src/otp.c src/keychain.c
 	@echo " - Built!"
 	@echo " - Testing..."
-	@sh test/otp.test.sh
+	@bash test/otp.test.sh
+	@bash test/keychain.test.sh
 	@echo " - Tested!"
 	@echo
 
