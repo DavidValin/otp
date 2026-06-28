@@ -29,6 +29,8 @@
 #include <process.h>
 #endif
 
+#include "keychain.h"
+
 #ifndef _WIN32
 #define O_BINARY 0
 #endif
@@ -85,8 +87,121 @@ int main(int argc, char *argv[]) {
    * *********************************************************************** */
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0)) {
-    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, ending with \".next\".\n\nUses:\n  encrypt\tcecho \"plain\" | otp KEY_FILE.txt > cipher.txt\n  decrypt\tcat cipher.txt | otp KEY_FILE.txt > plain.txt\n  new-key-pair\tcat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\n");
+    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, ending with \".next\".\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n\n");
     return 0;
+  }
+
+  /* **************************************************************************
+   *  Handles keychain commands                                               *
+   * *********************************************************************** */
+
+  // Load keychain for all keychain operations
+  const char *keychain_file = "keychain.txt";
+  
+  if (argc >= 3 && (strcmp(argv[1], "-ac") == 0 || strcmp(argv[1], "--add-contact") == 0)) {
+    load_keychain(keychain_file);
+    int result;
+    
+    // Check if key files are provided
+    if (argc >= 5) {
+      // Add contact with keys: otp -ac <name> <enc_key_file> <dec_key_file>
+      result = add_contact_with_keys(argv[2], argv[3], argv[4]);
+    } else {
+      // Add contact without keys: otp -ac <name>
+      result = add_contact(argv[2]);
+      if (result == 0) {
+        printf("Contact '%s' added successfully\n", argv[2]);
+      }
+    }
+    
+    cleanup_keychain();
+    return result;
+  }
+
+  if (argc >= 3 && (strcmp(argv[1], "-rc") == 0 || strcmp(argv[1], "--remove-contact") == 0)) {
+    load_keychain(keychain_file);
+    int result = remove_contact(argv[2]);
+    cleanup_keychain();
+    if (result == 0) {
+      printf("Contact '%s' removed successfully\n", argv[2]);
+    }
+    return result;
+  }
+
+  if (argc >= 3 && (strcmp(argv[1], "-hc") == 0 || strcmp(argv[1], "--has-contact") == 0)) {
+    load_keychain(keychain_file);
+    int exists = has_contact(argv[2]);
+    cleanup_keychain();
+    if (exists) {
+      printf("Contact '%s' exists\n", argv[2]);
+      return 0;
+    } else {
+      printf("Contact '%s' does not exist\n", argv[2]);
+      return 1;
+    }
+  }
+
+  if (argc >= 2 && (strcmp(argv[1], "-lc") == 0 || strcmp(argv[1], "--list-contacts") == 0)) {
+    load_keychain(keychain_file);
+    list_contacts();
+    cleanup_keychain();
+    return 0;
+  }
+
+  if (argc >= 3 && (strcmp(argv[1], "-sc") == 0 || strcmp(argv[1], "--show-contact") == 0)) {
+    load_keychain(keychain_file);
+    show_contact(argv[2]);
+    cleanup_keychain();
+    return 0;
+  }
+
+  /* **************************************************************************
+   *  Handles -c (--contact) command for encryption/decryption                *
+   * *********************************************************************** */
+
+  if (argc >= 3 && (strcmp(argv[1], "-c") == 0 || strcmp(argv[1], "--contact") == 0)) {
+    if (argc < 4) {
+      fprintf(stderr, "Error: -c option requires contact name and --encrypt or --decrypt flag\n");
+      fprintf(stderr, "Usage: otp -c <contact_name> --encrypt|--decrypt\n");
+      return 1;
+    }
+  }
+
+  if (argc >= 4 && (strcmp(argv[1], "-c") == 0 || strcmp(argv[1], "--contact") == 0)) {
+    const char *contact_name = argv[2];
+    int is_encrypt = 0;
+    int is_decrypt = 0;
+    
+    // Check for --encrypt or --decrypt flag
+    for (int i = 3; i < argc; i++) {
+      if (strcmp(argv[i], "--encrypt") == 0) {
+        is_encrypt = 1;
+      } else if (strcmp(argv[i], "--decrypt") == 0) {
+        is_decrypt = 1;
+      }
+    }
+    
+    if (!is_encrypt && !is_decrypt) {
+      fprintf(stderr, "Error: Must specify --encrypt or --decrypt with -c option\n");
+      return 1;
+    }
+    
+    if (is_encrypt && is_decrypt) {
+      fprintf(stderr, "Error: Cannot specify both --encrypt and --decrypt\n");
+      return 1;
+    }
+    
+    load_keychain(keychain_file);
+    
+    int result;
+    if (is_encrypt) {
+      result = encrypt_with_contact(contact_name, stdin, stdout);
+    } else {
+      result = decrypt_with_contact(contact_name, stdin, stdout);
+    }
+    
+    cleanup_keychain();
+    return result;
   }
 
   /* **************************************************************************
@@ -160,6 +275,12 @@ int main(int argc, char *argv[]) {
   /* **************************************************************************
    *  Handles encryption / decryption via stdin + key file                    *
    * *********************************************************************** */
+
+  // Ensure we have a key file argument for encryption/decryption
+  if (argc < 2) {
+    fprintf(stderr, "Error: No key file specified. Use -h for help.\n");
+    return 1;
+  }
 
   /* Build output name safely with high‑resolution timestamp and random suffix */
   char outfileunused[256];
