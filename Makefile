@@ -12,7 +12,8 @@ ifeq ($(OS),Windows_NT)
 else
   CC := gcc
   BIN_EXT :=
-  BUILD_FLAGS := -O2 -Wall
+  # Enable Large File Support (LFS) for files >2GB on 32-bit systems
+  BUILD_FLAGS := -O2 -Wall -D_FILE_OFFSET_BITS=64
 endif
 
 BIN := bin/otp$(BIN_EXT)
@@ -22,13 +23,14 @@ build:
 	@echo " - Building..."
 	@mkdir -p bin
 	@if [ "$(OS)" = "Windows_NT" ]; then \
-		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c src/keychain.c || exit 1; \
 	else \
-		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c src/keychain.c || exit 1; \
 	fi
 	@echo " - Built!"
 	@echo " - Testing..."
-	@sh test/otp.test.sh
+	@bash test/otp.test.sh
+	@bash test/keychain.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -52,10 +54,11 @@ musl:
 	@echo
 	@echo " - Building musl static binary..."
 	@mkdir -p bin
-	@musl-gcc -static -o $(BIN) src/otp.c
+	@musl-gcc -static -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c
 	@echo " - Built!"
 	@echo " - Testing..."
-	@sh test/otp.test.sh
+	@bash test/otp.test.sh
+	@bash test/keychain.test.sh
 	@echo " - Tested!"
 	@echo
 
