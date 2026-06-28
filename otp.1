@@ -1,6 +1,6 @@
 # OTP manual page
 
-.TH OTP 1 "2026-03-18" "OTP v1.0.4" "User Commands"
+.TH OTP 1 "2026-03-18" "OTP v1.1.0" "User Commands"
 
 .SH NAME
 otp \- simple one‑time pad encryption/decryption utility
@@ -37,7 +37,7 @@ otp \- simple one‑time pad encryption/decryption utility
 [-c | --contact] <contact_name> --decrypt
 
 .SH DESCRIPTION
-This program takes data from standard input, XORs it with a key file, and writes the result to standard output.  After processing it writes a new file containing the part of the key file that was not used, ending with ``.next``.  This ensures the key cannot be reused.  The key file must be a binary file containing random data; after each use the unused portion is moved to a new file for the next run.
+This program takes data from standard input, XORs it with a key file, and writes the result to standard output.  After processing it writes a new file containing the part of the key file that was not used, ending with ``.next``.  This ensures the key cannot be reused.  The key file must be a binary file containing random data; after each use the unused portion is moved to a new file for the next run. It also allows generating key pairs, manage a keychain of contacts and encrypt/decrypt using the keychain keys.
 
 .SH OPTIONS
 .TP
@@ -110,7 +110,18 @@ Example:
 .B cat /dev/urandom | otp --new-key-pair 1 alice bob
 
 .SH KEYCHAIN MANAGEMENT
-The keychain feature allows you to manage contacts with their associated encryption and decryption keys.  All contacts are stored in a file named \fBkeychain.txt\fP in the current directory.  The keychain provides a convenient way to perform one-time pad encryption and decryption with stored keys, automatically managing key consumption and metadata.
+The keychain feature allows you to manage contacts with their associated encryption and decryption keys.  Contact metadata is stored in \fBkeychain.txt\fP in the current directory, while actual key files are stored in the \fB.keychain/\fP subdirectory.  The keychain provides a convenient way to perform one-time pad encryption and decryption with stored keys, automatically managing key consumption and metadata.
+
+.PP
+.B File Storage Architecture
+.br
+The keychain uses a streaming architecture that supports extremely large keys (up to 1 TB) without loading them into memory:
+.IP \(bu 3
+\fBkeychain.txt\fP \- Stores contact metadata (names, key file paths, offsets, sequences, timestamps)
+.IP \(bu 3
+\fB.keychain/\fP \- Directory containing actual key files, named as <contact>_enc.key and <contact>_dec.key
+.IP \(bu 3
+Keys are read and processed in 4 MB chunks during encryption/decryption, enabling support for terabyte-sized keys without memory constraints
 
 .SS Contact Data Structure
 Each contact in the keychain stores:
@@ -119,19 +130,22 @@ Each contact in the keychain stores:
 \- The contact's name (unique identifier)
 .br
 .B EncryptionKey
-\- Current encryption key in binary format (displayed as ******* for security). This key is used when encrypting messages to send to the contact. After each encryption, the used portion is removed and only the remaining unused bytes are kept.
+\- Encryption key stored in .keychain/<contact>_enc.key (displayed as ******* with remaining bytes for security). This key is used when encrypting messages to send to the contact. The key file is read in streaming chunks during encryption.
 .br
 .B EncryptionKeyOffset
-\- Total number of bytes consumed from the original encryption key. This tracks how much of the key has been used.
+\- Number of bytes consumed from the encryption key file. This tracks cumulative consumption for reference purposes.
 .br
-.B Sequence
-\- Sequence number incremented on every encryption or decryption operation. Used to track the total number of operations performed with this contact.
+.B EncryptedSequence
+\- Sequence number incremented on every encryption operation. Tracks the total number of messages encrypted (sent) to this contact.
 .br
 .B DecryptionKey
-\- Current decryption key in binary format (displayed as ******* for security). This key is used when decrypting messages received from the contact. After each decryption, the used portion is removed and only the remaining unused bytes are kept.
+\- Decryption key stored in .keychain/<contact>_dec.key (displayed as ******* with remaining bytes for security). This key is used when decrypting messages received from the contact. The key file is read in streaming chunks during decryption.
 .br
 .B DecryptionKeyOffset
-\- Total number of bytes consumed from the original decryption key. This tracks how much of the key has been used.
+\- Number of bytes consumed from the decryption key file. This tracks cumulative consumption for reference purposes.
+.br
+.B DecryptedSequence
+\- Sequence number incremented on every decryption operation. Tracks the total number of messages decrypted (received) from this contact.
 .br
 .B LastMessageSent
 \- The cipher text of the last message encrypted (stored for retry purposes). Only updated during encryption operations.
@@ -169,7 +183,7 @@ When Alice encrypts a message using -c alice --encrypt, the program:
 .br
 \- Stores the cipher text in LastMessageSent
 .br
-\- Increments the Sequence number
+\- Increments the EncryptedSequence number
 .br
 \- Updates EncryptionKeyOffset by the message length
 .br
@@ -190,7 +204,7 @@ When Bob decrypts the message using -c bob --decrypt, the program:
 .br
 \- Writes the plaintext to stdout
 .br
-\- Increments the Sequence number
+\- Increments the DecryptedSequence number
 .br
 \- Updates DecryptionKeyOffset by the message length
 .br
@@ -435,7 +449,7 @@ The Sequence number is 2 because Alice performed 2 operations (1 encrypt + 1 dec
 .RS
 \- Never reuse keys. Once keys are exhausted, generate new key pairs.
 .br
-\- The keychain.txt file should be kept secure with appropriate file permissions (600).
+\- Both keychain.txt and the .keychain/ directory should be kept secure with appropriate file permissions (600 for keychain.txt, 700 for .keychain/ directory).
 .br
 \- Use a true hardware random number generator (TRNG) for key generation in production.
 .br
@@ -443,7 +457,9 @@ The Sequence number is 2 because Alice performed 2 operations (1 encrypt + 1 dec
 .br
 \- Monitor key consumption using --show-contact to know when keys are running low.
 .br
-\- Back up your keychain.txt file securely if you need to preserve message history and retry capability.
+\- Back up both your keychain.txt file and .keychain/ directory securely if you need to preserve keys and message history.
+.br
+\- The streaming architecture allows keys up to 1 TB in size, enabling extremely long-term secure communication without memory constraints.
 .RE
 .PP
 

@@ -306,7 +306,8 @@ rm tmpkey
 
 # Encrypt a message
 PLAIN_MSG="Hello, World!"
-CIPHER=$(echo -n "$PLAIN_MSG" | ./bin/otp -c enctest --encrypt 2>/dev/null)
+echo -n "$PLAIN_MSG" > test_plain.txt
+./bin/otp -c enctest --encrypt < test_plain.txt > test_cipher.bin 2>/dev/null
 
 if [ $? -eq 0 ]; then
   echo "     - PASS - encryption with contact succeeded"
@@ -315,8 +316,8 @@ else
   exit -1
 fi
 
-# Verify cipher text is not the same as plain text
-if [ "$CIPHER" != "$PLAIN_MSG" ]; then
+# Verify cipher text is not the same as plain text (compare file sizes or content)
+if ! diff -q test_plain.txt test_cipher.bin > /dev/null 2>&1; then
   echo "     - PASS - cipher text differs from plain text"
 else
   echo "     ! FAIL - cipher text same as plain text"
@@ -334,7 +335,7 @@ else
 fi
 
 # Verify sequence was incremented
-echo "$OUTPUT" | grep -q "Sequence: 1"
+echo "$OUTPUT" | grep -q "EncryptedSequence: 1"
 if [ $? -eq 0 ]; then
   echo "     - PASS - sequence incremented correctly"
 else
@@ -371,7 +372,7 @@ echo "     Testing decryption with contact..."
 ./bin/otp --add-contact dectest encryption_dectest.txt decryption_dectest.txt > /dev/null 2>&1
 
 # Decrypt the cipher using dectest's decryption key
-DECRYPTED=$(echo -n "$CIPHER" | ./bin/otp -c dectest --decrypt 2>/dev/null)
+./bin/otp -c dectest --decrypt < test_cipher.bin > test_decrypted.txt 2>/dev/null
 
 if [ $? -eq 0 ]; then
   echo "     - PASS - decryption with contact succeeded"
@@ -381,10 +382,13 @@ else
 fi
 
 # Verify decrypted text matches original
-if [ "$DECRYPTED" = "$PLAIN_MSG" ]; then
+if diff -q test_plain.txt test_decrypted.txt > /dev/null 2>&1; then
   echo "     - PASS - decrypted text matches original plain text"
 else
-  echo "     ! FAIL - decrypted text does not match (expected '$PLAIN_MSG', got '$DECRYPTED')"
+  echo "     ! FAIL - decrypted text does not match"
+  cat test_plain.txt
+  echo "---"
+  cat test_decrypted.txt
   exit -1
 fi
 
@@ -453,7 +457,7 @@ fi
 
 # Verify keychain was not modified (sequence should still be 0)
 OUTPUT=$(./bin/otp --show-contact smallkeytest)
-echo "$OUTPUT" | grep -q "Sequence: 0"
+echo "$OUTPUT" | grep -q "EncryptedSequence: 0"
 if [ $? -eq 0 ]; then
   echo "     - PASS - keychain not modified on error"
 else
@@ -481,10 +485,11 @@ echo "     Testing multiple operations..."
 
 # Second encryption should use the next part of the key
 PLAIN_MSG2="Second message"
-CIPHER2=$(echo -n "$PLAIN_MSG2" | ./bin/otp -c enctest --encrypt 2>/dev/null)
+echo -n "$PLAIN_MSG2" > test_plain2.txt
+./bin/otp -c enctest --encrypt < test_plain2.txt > test_cipher2.bin 2>/dev/null
 
 OUTPUT=$(./bin/otp --show-contact enctest)
-echo "$OUTPUT" | grep -q "Sequence: 2"
+echo "$OUTPUT" | grep -q "EncryptedSequence: 2"
 if [ $? -eq 0 ]; then
   echo "     - PASS - sequence incremented on second operation"
 else
@@ -562,16 +567,19 @@ else
   exit -1
 fi
 
-# Verify both parties have same sequence numbers
+# Verify both parties have correct sequence numbers
 cp alice_keychain.txt keychain.txt
-ALICE_SEQ=$(./bin/otp -sc bob 2>/dev/null | grep "Sequence:" | awk '{print $2}')
+ALICE_ENC_SEQ=$(./bin/otp -sc bob 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
+ALICE_DEC_SEQ=$(./bin/otp -sc bob 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
 cp bob_keychain.txt keychain.txt
-BOB_SEQ=$(./bin/otp -sc alice 2>/dev/null | grep "Sequence:" | awk '{print $2}')
+BOB_ENC_SEQ=$(./bin/otp -sc alice 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
+BOB_DEC_SEQ=$(./bin/otp -sc alice 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
 
-if [ "$ALICE_SEQ" = "2" ] && [ "$BOB_SEQ" = "2" ]; then
+# Alice sent 1, received 1; Bob sent 1, received 1
+if [ "$ALICE_ENC_SEQ" = "1" ] && [ "$ALICE_DEC_SEQ" = "1" ] && [ "$BOB_ENC_SEQ" = "1" ] && [ "$BOB_DEC_SEQ" = "1" ]; then
   echo "     - PASS - both parties have correct sequence numbers"
 else
-  echo "     ! FAIL - sequence numbers incorrect (Alice: $ALICE_SEQ, Bob: $BOB_SEQ)"
+  echo "     ! FAIL - sequence numbers incorrect (Alice enc:$ALICE_ENC_SEQ dec:$ALICE_DEC_SEQ, Bob enc:$BOB_ENC_SEQ dec:$BOB_DEC_SEQ)"
   exit -1
 fi
 

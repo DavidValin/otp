@@ -1,6 +1,6 @@
 /*****************************************************************************\
  *                                                                            *
- *   otp v1.0.4                                                               *
+ *   otp v1.1.0                                                               *
  *                                                                            *
  *    simple but effective one time pad encryption / decryption command       *
  *    that works with stdin/stdout and saves next unused key file.            *
@@ -11,6 +11,11 @@
  *   February 2 2026                                                          *
  *                                                                            *
  \****************************************************************************/
+
+// Enable Large File Support (LFS) for files >2GB on 32-bit POSIX systems
+#ifndef _WIN32
+#define _FILE_OFFSET_BITS 64
+#endif
 
 #include <stdlib.h>
 #include <stdio.h>
