@@ -87,7 +87,6 @@ struct stat;
 int main(int argc, char *argv[])
 {
   optind = 1;
-  srand((unsigned)time(NULL) ^ getpid());
 
   /* **************************************************************************
    *  Handles -h (--help) command                                             *
@@ -414,7 +413,9 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  /* Build output name safely with high‑resolution timestamp and random suffix */
+  /* Build output name from a 1-second-resolution timestamp (no random
+   * suffix); O_CREAT|O_EXCL below rejects a same-second collision instead
+   * of silently overwriting it. */
   char outfileunused[256];
   time_t t = time(NULL);
   struct tm tm_struct;
