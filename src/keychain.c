@@ -913,6 +913,24 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
     return -1;
   }
 
+  // Spool ciphertext to a temporary file instead of writing straight to
+  // `output`. A message can span multiple chunks; if it turns out to
+  // exceed the available key on a later chunk, earlier chunks must not
+  // have already been emitted (and their key bytes must not be spent) -
+  // otherwise those already-leaked bytes would be reused by the next
+  // message, breaking one-time-pad secrecy. Only after the whole message
+  // is confirmed to fit is the spool flushed to the real output and the
+  // key consumed.
+  FILE *spool = tmpfile();
+  if (!spool)
+  {
+    fprintf(stderr, "Error: Cannot create temporary spool file: %s\n", strerror(errno));
+    free(chunk);
+    free(key_chunk);
+    fclose(keyfile);
+    return -1;
+  }
+
   size_t total_bytes = 0;
   unsigned char *last_msg_buffer = NULL;
   size_t last_msg_size = 0;
@@ -933,6 +951,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -945,6 +964,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -954,14 +974,15 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       chunk[i] ^= key_chunk[i];
     }
 
-    // Write encrypted chunk
-    if (fwrite(chunk, 1, input_bytes, output) != input_bytes)
+    // Write encrypted chunk to the spool file (not the real output yet)
+    if (fwrite(chunk, 1, input_bytes, spool) != input_bytes)
     {
-      fprintf(stderr, "Error: Failed to write encrypted data\n");
+      fprintf(stderr, "Error: Failed to write encrypted data to spool file\n");
       free(chunk);
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -982,15 +1003,36 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   }
 
   fclose(keyfile);
-  free(chunk);
-  free(key_chunk);
 
   if (total_bytes == 0)
   {
     fprintf(stderr, "Error: No input data provided\n");
+    free(chunk);
+    free(key_chunk);
     free(last_msg_buffer);
+    fclose(spool);
     return -1;
   }
+
+  // The whole message fit within the available key - flush the spooled
+  // ciphertext to the real output now.
+  rewind(spool);
+  size_t flushed;
+  while ((flushed = fread(chunk, 1, CHUNK_SIZE, spool)) > 0)
+  {
+    if (fwrite(chunk, 1, flushed, output) != flushed)
+    {
+      fprintf(stderr, "Error: Failed to write encrypted data\n");
+      free(chunk);
+      free(key_chunk);
+      free(last_msg_buffer);
+      fclose(spool);
+      return -1;
+    }
+  }
+  fclose(spool);
+  free(chunk);
+  free(key_chunk);
 
   // Truncate consumed bytes from key file
   // Read remaining key data
@@ -1099,6 +1141,22 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
     return -1;
   }
 
+  // Spool plaintext to a temporary file instead of writing straight to
+  // `output`, so a message that turns out to exceed the available key on
+  // a later chunk hasn't already had earlier chunks emitted (which would
+  // leave those key bytes looking "unused" while their ciphertext was
+  // already handled downstream). See encrypt_with_contact for the same
+  // rationale.
+  FILE *spool = tmpfile();
+  if (!spool)
+  {
+    fprintf(stderr, "Error: Cannot create temporary spool file: %s\n", strerror(errno));
+    free(chunk);
+    free(key_chunk);
+    fclose(keyfile);
+    return -1;
+  }
+
   size_t total_bytes = 0;
 
   while (1)
@@ -1116,6 +1174,7 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -1127,6 +1186,7 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -1136,13 +1196,14 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       chunk[i] ^= key_chunk[i];
     }
 
-    // Write decrypted chunk
-    if (fwrite(chunk, 1, input_bytes, output) != input_bytes)
+    // Write decrypted chunk to the spool file (not the real output yet)
+    if (fwrite(chunk, 1, input_bytes, spool) != input_bytes)
     {
-      fprintf(stderr, "Error: Failed to write decrypted data\n");
+      fprintf(stderr, "Error: Failed to write decrypted data to spool file\n");
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
+      fclose(spool);
       return -1;
     }
 
@@ -1150,14 +1211,34 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   }
 
   fclose(keyfile);
-  free(chunk);
-  free(key_chunk);
 
   if (total_bytes == 0)
   {
     fprintf(stderr, "Error: No input data provided\n");
+    free(chunk);
+    free(key_chunk);
+    fclose(spool);
     return -1;
   }
+
+  // The whole message fit within the available key - flush the spooled
+  // plaintext to the real output now.
+  rewind(spool);
+  size_t flushed;
+  while ((flushed = fread(chunk, 1, CHUNK_SIZE, spool)) > 0)
+  {
+    if (fwrite(chunk, 1, flushed, output) != flushed)
+    {
+      fprintf(stderr, "Error: Failed to write decrypted data\n");
+      free(chunk);
+      free(key_chunk);
+      fclose(spool);
+      return -1;
+    }
+  }
+  fclose(spool);
+  free(chunk);
+  free(key_chunk);
 
   // Truncate consumed bytes from key file
   // Read remaining key data
