@@ -1,10 +1,10 @@
 /*****************************************************************************\
- *                                                                            *
+ *                                                                           *
  *   keychain.c - Keychain management for OTP contacts                       *
- *                                                                            *
- *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com           *
- *   License: Apache 2.0                                                      *
- *                                                                            *
+ *                                                                           *
+ *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com          *
+ *   License: Apache 2.0                                                     *
+ *                                                                           *
  \****************************************************************************/
 
 // Enable Large File Support (LFS) for files >2GB on 32-bit POSIX systems
@@ -13,10 +13,13 @@
 #endif
 
 #include "keychain.h"
+#include "commit.h"
+#include "platform.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <time.h>
 
@@ -24,6 +27,7 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#include <process.h>
 #include <sys/stat.h>
 // Windows compatibility mappings
 #define mkdir(path, mode) _mkdir(path)
@@ -33,6 +37,7 @@
 #define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
 #define PATH_SEPARATOR '\\'
 #define PATH_SEPARATOR_STR "\\"
+#define getpid _getpid
 #else
 #include <sys/stat.h>
 #include <unistd.h>
@@ -251,229 +256,403 @@ static void unescape_string(const char *input, char *output, size_t max_output)
   output[j] = '\0';
 }
 
-// Load keychain from file
-int load_keychain(const char *file_path)
+// Read key=value fields for one contact record from an already-open
+// stream, until a blank line, a new "[...]" section, or EOF. Used both
+// for a single contact's own .meta file and, during the one-time legacy
+// migration below, for each block of an old combined keychain.txt.
+static void parse_contact_fields(FILE *f, Contact *c)
 {
-  FILE *f = fopen(file_path, "r");
-  if (!f)
-  {
-    // If file doesn't exist, initialize empty keychain
-    init_keychain();
-    strncpy(g_keychain.filepath, file_path, sizeof(g_keychain.filepath) - 1);
-    return 0;
-  }
-
-  cleanup_keychain();
-  init_keychain();
-  strncpy(g_keychain.filepath, file_path, sizeof(g_keychain.filepath) - 1);
-
 // Use a reasonable line buffer size for parsing (keys are base64 encoded, ~1.33x original)
 // 16MB buffer allows for ~12MB binary keys per line
-#define LINE_BUFFER_SIZE (16 * 1024 * 1024)
-  char *line = malloc(LINE_BUFFER_SIZE);
-  if (!line)
+#define FIELD_LINE_BUFFER_SIZE (16 * 1024 * 1024)
+  char *line = malloc(FIELD_LINE_BUFFER_SIZE);
+  char *value = malloc(FIELD_LINE_BUFFER_SIZE);
+  if (!line || !value)
   {
-    fprintf(stderr, "Error: Memory allocation failed for line buffer\n");
-    fclose(f);
-    return -1;
+    free(line);
+    free(value);
+    return;
   }
-  while (fgets(line, LINE_BUFFER_SIZE, f))
+
+  while (fgets(line, FIELD_LINE_BUFFER_SIZE, f))
   {
-    if (line[0] == '#' || line[0] == '\n')
-      continue;
-
-    if (strncmp(line, "[CONTACT]", 9) == 0)
+    if (line[0] == '\n' || line[0] == '[')
     {
-      if (g_keychain.count >= MAX_CONTACTS)
+      fseek(f, -(long)strlen(line), SEEK_CUR);
+      break;
+    }
+
+    char key[256];
+    // Parse key=value manually to avoid sscanf width limitations
+    char *equals = strchr(line, '=');
+    if (equals && sscanf(line, "%255[^=]", key) == 1)
+    {
+      // Copy everything after '=' to value
+      strncpy(value, equals + 1, FIELD_LINE_BUFFER_SIZE - 1);
+      value[FIELD_LINE_BUFFER_SIZE - 1] = '\0';
+      // Remove trailing newline if present
+      size_t len = strlen(value);
+      if (len > 0 && value[len - 1] == '\n')
       {
-        fprintf(stderr, "Error: Maximum contacts reached\n");
-        break;
+        value[len - 1] = '\0';
       }
-
-      Contact *c = &g_keychain.contacts[g_keychain.count];
-      memset(c, 0, sizeof(Contact));
-
-      // Read contact fields
-      while (fgets(line, LINE_BUFFER_SIZE, f))
+      if (strcmp(key, "Name") == 0)
       {
-        if (line[0] == '\n' || line[0] == '[')
+        unescape_string(value, c->Name, MAX_NAME_LENGTH);
+      }
+      else if (strcmp(key, "EncryptionKeyPath") == 0)
+      {
+        strncpy(c->EncryptionKeyPath, value, sizeof(c->EncryptionKeyPath) - 1);
+      }
+      else if (strcmp(key, "EncryptionKeySize") == 0)
+      {
+        c->EncryptionKeySize = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "EncryptionKeyOffset") == 0)
+      {
+        c->EncryptionKeyOffset = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "EncryptedSequence") == 0)
+      {
+        c->EncryptedSequence = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "Sequence") == 0)
+      {
+        // Legacy field - map to EncryptedSequence for backwards compatibility
+        c->EncryptedSequence = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "DecryptionKeyPath") == 0)
+      {
+        strncpy(c->DecryptionKeyPath, value, sizeof(c->DecryptionKeyPath) - 1);
+      }
+      else if (strcmp(key, "DecryptionKeySize") == 0)
+      {
+        c->DecryptionKeySize = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "DecryptionKeyOffset") == 0)
+      {
+        c->DecryptionKeyOffset = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "DecryptedSequence") == 0)
+      {
+        c->DecryptedSequence = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "LastMessageSent") == 0)
+      {
+        // Decode base64 LastMessageSent
+        size_t value_len = strlen(value);
+        if (value_len > 0)
         {
-          fseek(f, -(long)strlen(line), SEEK_CUR);
-          break;
-        }
-
-        char key[256];
-        char *value = malloc(LINE_BUFFER_SIZE);
-        if (!value)
-          continue;
-
-        // Parse key=value manually to avoid sscanf width limitations
-        char *equals = strchr(line, '=');
-        if (equals && sscanf(line, "%255[^=]", key) == 1)
-        {
-          // Copy everything after '=' to value
-          strncpy(value, equals + 1, LINE_BUFFER_SIZE - 1);
-          value[LINE_BUFFER_SIZE - 1] = '\0';
-          // Remove trailing newline if present
-          size_t len = strlen(value);
-          if (len > 0 && value[len - 1] == '\n')
+          c->LastMessageSent = malloc(value_len); // Decoded will be smaller
+          if (c->LastMessageSent)
           {
-            value[len - 1] = '\0';
-          }
-          if (strcmp(key, "Name") == 0)
-          {
-            unescape_string(value, c->Name, MAX_NAME_LENGTH);
-          }
-          else if (strcmp(key, "EncryptionKeyPath") == 0)
-          {
-            strncpy(c->EncryptionKeyPath, value, sizeof(c->EncryptionKeyPath) - 1);
-          }
-          else if (strcmp(key, "EncryptionKeySize") == 0)
-          {
-            c->EncryptionKeySize = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "EncryptionKeyOffset") == 0)
-          {
-            c->EncryptionKeyOffset = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "EncryptedSequence") == 0)
-          {
-            c->EncryptedSequence = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "Sequence") == 0)
-          {
-            // Legacy field - map to EncryptedSequence for backwards compatibility
-            c->EncryptedSequence = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "DecryptionKeyPath") == 0)
-          {
-            strncpy(c->DecryptionKeyPath, value, sizeof(c->DecryptionKeyPath) - 1);
-          }
-          else if (strcmp(key, "DecryptionKeySize") == 0)
-          {
-            c->DecryptionKeySize = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "DecryptionKeyOffset") == 0)
-          {
-            c->DecryptionKeyOffset = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "DecryptedSequence") == 0)
-          {
-            c->DecryptedSequence = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "LastMessageSent") == 0)
-          {
-            // Decode base64 LastMessageSent
-            size_t value_len = strlen(value);
-            if (value_len > 0)
-            {
-              c->LastMessageSent = malloc(value_len); // Decoded will be smaller
-              if (c->LastMessageSent)
-              {
-                c->LastMessageSentSize = base64_decode(value, c->LastMessageSent, value_len);
-              }
-            }
-          }
-          else if (strcmp(key, "LastMessageSentSize") == 0)
-          {
-            c->LastMessageSentSize = (size_t)atoll(value);
-          }
-          else if (strcmp(key, "RetryCount") == 0)
-          {
-            c->RetryCount = atoi(value);
-            if (c->RetryCount < MIN_RETRY_COUNT)
-              c->RetryCount = MIN_RETRY_COUNT;
-            if (c->RetryCount > MAX_RETRY_COUNT)
-              c->RetryCount = MAX_RETRY_COUNT;
-          }
-          else if (strcmp(key, "LastMessageSentAt") == 0)
-          {
-            c->LastMessageSentAt = (time_t)atoll(value);
-          }
-          else if (strcmp(key, "LastMessageReceivedAt") == 0)
-          {
-            c->LastMessageReceivedAt = (time_t)atoll(value);
+            c->LastMessageSentSize = base64_decode(value, c->LastMessageSent, value_len);
           }
         }
-
-        free(value);
       }
-
-      g_keychain.count++;
+      else if (strcmp(key, "LastMessageSentSize") == 0)
+      {
+        c->LastMessageSentSize = (size_t)atoll(value);
+      }
+      else if (strcmp(key, "RetryCount") == 0)
+      {
+        c->RetryCount = atoi(value);
+        if (c->RetryCount < MIN_RETRY_COUNT)
+          c->RetryCount = MIN_RETRY_COUNT;
+        if (c->RetryCount > MAX_RETRY_COUNT)
+          c->RetryCount = MAX_RETRY_COUNT;
+      }
+      else if (strcmp(key, "LastMessageSentAt") == 0)
+      {
+        c->LastMessageSentAt = (time_t)atoll(value);
+      }
+      else if (strcmp(key, "LastMessageReceivedAt") == 0)
+      {
+        c->LastMessageReceivedAt = (time_t)atoll(value);
+      }
     }
   }
 
   free(line);
-  fclose(f);
+  free(value);
+#undef FIELD_LINE_BUFFER_SIZE
+}
+
+// Small growable buffer used to build one contact's metadata content in
+// memory before it is committed - this lets save_contact_meta hand the
+// exact, complete, intended bytes to commit_write_verified() for a real
+// read-back comparison, rather than trusting fprintf()'s return value.
+typedef struct
+{
+  char *data;
+  size_t len;
+  size_t cap;
+} GrowBuf;
+
+static int gb_append(GrowBuf *g, const char *s, size_t n)
+{
+  if (g->len + n + 1 > g->cap)
+  {
+    size_t new_cap = g->cap ? g->cap * 2 : 4096;
+    while (new_cap < g->len + n + 1)
+      new_cap *= 2;
+    char *nd = realloc(g->data, new_cap);
+    if (!nd)
+      return -1;
+    g->data = nd;
+    g->cap = new_cap;
+  }
+  memcpy(g->data + g->len, s, n);
+  g->len += n;
+  g->data[g->len] = '\0';
   return 0;
 }
 
-// Save keychain to file
-int save_keychain(const char *file_path)
+static int gb_printf(GrowBuf *g, const char *fmt, ...)
 {
-  FILE *f = fopen(file_path, "w");
-  if (!f)
-  {
-    fprintf(stderr, "Error: Cannot open keychain file %s for writing: %s\n",
-            file_path, strerror(errno));
+  char stackbuf[4096];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(stackbuf, sizeof(stackbuf), fmt, ap);
+  va_end(ap);
+  if (n < 0)
     return -1;
+  if ((size_t)n < sizeof(stackbuf))
+    return gb_append(g, stackbuf, (size_t)n);
+
+  char *big = malloc((size_t)n + 1);
+  if (!big)
+    return -1;
+  va_start(ap, fmt);
+  vsnprintf(big, (size_t)n + 1, fmt, ap);
+  va_end(ap);
+  int rc = gb_append(g, big, (size_t)n);
+  free(big);
+  return rc;
+}
+
+// Persist ONE contact to its own file, <keychain_dir>/<name>.meta -
+// atomically and verified, via the same stage -> verify -> publish
+// primitives used everywhere else in this module (commit_write_verified
+// + commit_publish). Because every contact's metadata now lives in its
+// own file instead of one shared keychain.txt, two different contacts
+// can never collide here - this is what actually eliminates the
+// cross-contact metadata race between concurrent operations on different
+// contacts, rather than merely serializing around it.
+static int save_contact_meta(const char *keychain_dir, Contact *c)
+{
+  GrowBuf buf = {0};
+  int build_failed = 0;
+
+  char escaped_name[MAX_NAME_LENGTH * 2];
+  escape_string(c->Name, escaped_name, sizeof(escaped_name));
+
+  if (gb_printf(&buf, "[CONTACT]\n") != 0 ||
+      gb_printf(&buf, "Name=%s\n", escaped_name) != 0 ||
+      gb_printf(&buf, "EncryptionKeyPath=%s\n", c->EncryptionKeyPath) != 0 ||
+      gb_printf(&buf, "EncryptionKeySize=%zu\n", c->EncryptionKeySize) != 0 ||
+      gb_printf(&buf, "EncryptionKeyOffset=%zu\n", c->EncryptionKeyOffset) != 0 ||
+      gb_printf(&buf, "EncryptedSequence=%zu\n", c->EncryptedSequence) != 0 ||
+      gb_printf(&buf, "DecryptionKeyPath=%s\n", c->DecryptionKeyPath) != 0 ||
+      gb_printf(&buf, "DecryptionKeySize=%zu\n", c->DecryptionKeySize) != 0 ||
+      gb_printf(&buf, "DecryptionKeyOffset=%zu\n", c->DecryptionKeyOffset) != 0 ||
+      gb_printf(&buf, "DecryptedSequence=%zu\n", c->DecryptedSequence) != 0)
+  {
+    build_failed = 1;
   }
 
-  fprintf(f, "# OTP Keychain File\n");
-  fprintf(f, "# Format: key=value pairs per contact\n\n");
-
-  for (int i = 0; i < g_keychain.count; i++)
+  if (!build_failed)
   {
-    Contact *c = &g_keychain.contacts[i];
-
-    fprintf(f, "[CONTACT]\n");
-
-    char escaped_name[MAX_NAME_LENGTH * 2];
-    escape_string(c->Name, escaped_name, sizeof(escaped_name));
-    fprintf(f, "Name=%s\n", escaped_name);
-
-    // Save key file paths
-    fprintf(f, "EncryptionKeyPath=%s\n", c->EncryptionKeyPath);
-    fprintf(f, "EncryptionKeySize=%zu\n", c->EncryptionKeySize);
-    fprintf(f, "EncryptionKeyOffset=%zu\n", c->EncryptionKeyOffset);
-    fprintf(f, "EncryptedSequence=%zu\n", c->EncryptedSequence);
-
-    fprintf(f, "DecryptionKeyPath=%s\n", c->DecryptionKeyPath);
-    fprintf(f, "DecryptionKeySize=%zu\n", c->DecryptionKeySize);
-    fprintf(f, "DecryptionKeyOffset=%zu\n", c->DecryptionKeyOffset);
-    fprintf(f, "DecryptedSequence=%zu\n", c->DecryptedSequence);
-
-    // Encode LastMessageSent as base64
     if (c->LastMessageSent && c->LastMessageSentSize > 0)
     {
       char *msg_b64 = malloc(c->LastMessageSentSize * 4 / 3 + 4);
-      if (msg_b64)
+      if (!msg_b64)
       {
-        base64_encode(c->LastMessageSent, c->LastMessageSentSize, msg_b64);
-        fprintf(f, "LastMessageSent=%s\n", msg_b64);
-        free(msg_b64);
+        build_failed = 1;
       }
       else
       {
-        fprintf(f, "LastMessageSent=\n");
+        base64_encode(c->LastMessageSent, c->LastMessageSentSize, msg_b64);
+        int rc = gb_printf(&buf, "LastMessageSent=%s\n", msg_b64);
+        free(msg_b64);
+        if (rc != 0)
+          build_failed = 1;
       }
     }
-    else
+    else if (gb_printf(&buf, "LastMessageSent=\n") != 0)
     {
-      fprintf(f, "LastMessageSent=\n");
+      build_failed = 1;
     }
-    fprintf(f, "LastMessageSentSize=%zu\n", c->LastMessageSentSize);
-
-    fprintf(f, "RetryCount=%d\n", c->RetryCount);
-    fprintf(f, "LastMessageSentAt=%lld\n", (long long)c->LastMessageSentAt);
-    fprintf(f, "LastMessageReceivedAt=%lld\n", (long long)c->LastMessageReceivedAt);
-    fprintf(f, "\n");
   }
 
+  if (!build_failed &&
+      (gb_printf(&buf, "LastMessageSentSize=%zu\n", c->LastMessageSentSize) != 0 ||
+       gb_printf(&buf, "RetryCount=%d\n", c->RetryCount) != 0 ||
+       gb_printf(&buf, "LastMessageSentAt=%lld\n", (long long)c->LastMessageSentAt) != 0 ||
+       gb_printf(&buf, "LastMessageReceivedAt=%lld\n", (long long)c->LastMessageReceivedAt) != 0))
+  {
+    build_failed = 1;
+  }
+
+  if (build_failed)
+  {
+    fprintf(stderr, "Error: Memory allocation failed while building metadata for '%s'\n", c->Name);
+    free(buf.data);
+    return -1;
+  }
+
+  char meta_path[600];
+  snprintf(meta_path, sizeof(meta_path), "%s%c%s.meta", keychain_dir, PATH_SEPARATOR, c->Name);
+  char tmp_path[620];
+  snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", meta_path);
+
+  if (commit_write_verified(tmp_path, (const unsigned char *)buf.data, buf.len) != 0)
+  {
+    free(buf.data);
+    return -1;
+  }
+  free(buf.data);
+
+  return commit_publish(tmp_path, meta_path);
+}
+
+// Load a single contact from its own .meta file into g_keychain.
+static void load_contact_meta_file(const char *path)
+{
+  if (g_keychain.count >= MAX_CONTACTS)
+    return;
+
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return;
+
+  char header[32];
+  if (!fgets(header, sizeof(header), f))
+  {
+    fclose(f);
+    return;
+  }
+  // First line is the "[CONTACT]" marker written by save_contact_meta();
+  // remaining lines are key=value fields.
+
+  Contact *c = &g_keychain.contacts[g_keychain.count];
+  memset(c, 0, sizeof(Contact));
+  parse_contact_fields(f, c);
   fclose(f);
-  strncpy(g_keychain.filepath, file_path, sizeof(g_keychain.filepath) - 1);
+
+  if (c->Name[0] != '\0')
+    g_keychain.count++;
+}
+
+// One-time, self-healing migration from the legacy combined keychain.txt
+// (older installs) to one .meta file per contact. Idempotent and
+// crash-safe: re-running it is harmless, since each contact is rewritten
+// through the same verified-write-then-publish path as any other save,
+// and the legacy file is only renamed out of the way as the LAST step,
+// once every contact from it has been written out successfully - so an
+// interrupted migration just re-runs in full on the next load rather
+// than silently losing whatever hadn't been converted yet.
+static void migrate_legacy_keychain_if_needed(const char *legacy_path, const char *keychain_dir)
+{
+  FILE *legacy = fopen(legacy_path, "r");
+  if (!legacy)
+    return; // nothing to migrate
+
+#define LEGACY_LINE_BUFFER_SIZE (16 * 1024 * 1024)
+  char *line = malloc(LEGACY_LINE_BUFFER_SIZE);
+  if (!line)
+  {
+    fclose(legacy);
+    return;
+  }
+
+  int migrated = 0;
+  while (fgets(line, LEGACY_LINE_BUFFER_SIZE, legacy))
+  {
+    if (line[0] == '#' || line[0] == '\n')
+      continue;
+    if (strncmp(line, "[CONTACT]", 9) != 0)
+      continue;
+
+    Contact c;
+    memset(&c, 0, sizeof(c));
+    parse_contact_fields(legacy, &c);
+    if (c.Name[0] != '\0')
+    {
+      save_contact_meta(keychain_dir, &c);
+      migrated++;
+    }
+    if (c.LastMessageSent)
+      free(c.LastMessageSent);
+  }
+
+  free(line);
+  fclose(legacy);
+#undef LEGACY_LINE_BUFFER_SIZE
+
+  char backup_path[600];
+  snprintf(backup_path, sizeof(backup_path), "%s.migrated", legacy_path);
+  if (rename(legacy_path, backup_path) == 0)
+  {
+    fprintf(stderr,
+            "Note: migrated %d contact(s) from legacy '%s' to per-contact files in '%s%c' "
+            "(original preserved as '%s')\n",
+            migrated, legacy_path, keychain_dir, PATH_SEPARATOR, backup_path);
+  }
+}
+
+// Load keychain: migrates a legacy combined keychain.txt if one is found,
+// then loads every contact from its own .meta file under the keychain
+// directory.
+int load_keychain(const char *file_path)
+{
+  // file_path may alias g_keychain.filepath itself (callers reloading
+  // after acquiring a per-contact lock do exactly this). init_keychain()
+  // below memsets the whole g_keychain struct, including filepath, which
+  // would invalidate file_path out from under us if it pointed there -
+  // so take our own copy up front, before touching anything.
+  char file_path_copy[sizeof(g_keychain.filepath)];
+  snprintf(file_path_copy, sizeof(file_path_copy), "%s", file_path);
+  file_path = file_path_copy;
+
+  cleanup_keychain();
+  init_keychain();
+  snprintf(g_keychain.filepath, sizeof(g_keychain.filepath), "%s", file_path);
+
+  char keychain_dir[512];
+  if (get_keychain_dir(file_path, keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  migrate_legacy_keychain_if_needed(file_path, keychain_dir);
+
+  // Every contact lives in its own <name>.meta file inside the keychain
+  // directory - load each one. opendir/readdir/closedir come from
+  // platform.h, which is a real dirent-backed implementation on POSIX
+  // and a FindFirstFile/FindNextFile-backed shim on Windows, so this
+  // loop is identical on both platforms.
+  DIR *d = opendir(keychain_dir);
+  if (!d)
+    return 0; // brand new keychain - nothing to load yet
+
+  struct dirent *entry;
+  while ((entry = readdir(d)) != NULL)
+  {
+    size_t name_len = strlen(entry->d_name);
+    if (name_len <= 5 || strcmp(entry->d_name + name_len - 5, ".meta") != 0)
+      continue;
+
+    char full_path[600];
+    snprintf(full_path, sizeof(full_path), "%s%c%s", keychain_dir, PATH_SEPARATOR, entry->d_name);
+    load_contact_meta_file(full_path);
+  }
+  closedir(d);
+
   return 0;
 }
+
 
 // Add a contact
 int add_contact(const char *name)
@@ -490,6 +669,13 @@ int add_contact(const char *name)
     return -1;
   }
 
+  char keychain_dir[512];
+  if (get_keychain_dir(g_keychain.filepath, keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
   Contact *c = &g_keychain.contacts[g_keychain.count];
   memset(c, 0, sizeof(Contact));
   strncpy(c->Name, name, MAX_NAME_LENGTH - 1);
@@ -497,7 +683,7 @@ int add_contact(const char *name)
 
   g_keychain.count++;
 
-  return save_keychain(g_keychain.filepath);
+  return save_contact_meta(keychain_dir, c);
 }
 
 // Add a contact with key files
@@ -548,6 +734,13 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
   if (enc_size == 0 || dec_size == 0)
   {
     fprintf(stderr, "Error: Key files cannot be empty\n");
+    return -1;
+  }
+
+  char keychain_dir[512];
+  if (get_keychain_dir(g_keychain.filepath, keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
     return -1;
   }
 
@@ -634,7 +827,7 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
 
   g_keychain.count++;
 
-  int result = save_keychain(g_keychain.filepath);
+  int result = save_contact_meta(keychain_dir, c);
   if (result == 0)
   {
     printf("Contact '%s' added with keys:\n", name);
@@ -664,6 +857,43 @@ int remove_contact(const char *name)
     return -1;
   }
 
+  // Hold the same per-contact lock encrypt/decrypt use, so a removal
+  // can't race with an in-flight operation that's mid-way through
+  // reading or truncating this contact's key files.
+  char keychain_dir[512];
+  int have_dir = (get_keychain_dir(g_keychain.filepath, keychain_dir, sizeof(keychain_dir)) == 0);
+
+  ContactLock lock;
+  int locked = 0;
+  if (have_dir)
+  {
+    if (contact_lock_acquire(&lock, keychain_dir, name) != 0)
+      return -1;
+    locked = 1;
+
+    // Reload from disk now that we hold the lock, and re-find the
+    // contact by name (not by the index computed before the wait) in
+    // case concurrent activity changed its position or removed it.
+    if (load_keychain(g_keychain.filepath) == 0)
+    {
+      index = -1;
+      for (int i = 0; i < g_keychain.count; i++)
+      {
+        if (strcmp(g_keychain.contacts[i].Name, name) == 0)
+        {
+          index = i;
+          break;
+        }
+      }
+      if (index == -1)
+      {
+        fprintf(stderr, "Error: Contact '%s' not found\n", name);
+        contact_lock_release(&lock);
+        return -1;
+      }
+    }
+  }
+
   // Delete key files
   if (g_keychain.contacts[index].EncryptionKeyPath[0] != '\0')
   {
@@ -678,7 +908,14 @@ int remove_contact(const char *name)
     free(g_keychain.contacts[index].LastMessageSent);
   }
 
-  // Shift remaining contacts
+  // Clean up any leftover staged pending artifacts for this contact so
+  // they don't linger in .keychain/ forever.
+  if (have_dir)
+  {
+    commit_discard_all_pending(keychain_dir, name);
+  }
+
+  // Shift remaining contacts (in-memory bookkeeping only)
   for (int i = index; i < g_keychain.count - 1; i++)
   {
     g_keychain.contacts[i] = g_keychain.contacts[i + 1];
@@ -686,7 +923,31 @@ int remove_contact(const char *name)
 
   g_keychain.count--;
 
-  return save_keychain(g_keychain.filepath);
+  // Each contact owns its own metadata file, so removing one is just
+  // deleting that file - no other contact's file is ever touched.
+  int result = 0;
+  if (have_dir)
+  {
+    char meta_path[600];
+    snprintf(meta_path, sizeof(meta_path), "%s%c%s.meta", keychain_dir, PATH_SEPARATOR, name);
+    if (unlink(meta_path) != 0 && errno != ENOENT)
+    {
+      fprintf(stderr, "Error: Failed to remove metadata file %s: %s\n", meta_path, strerror(errno));
+      result = -1;
+    }
+  }
+
+  if (locked)
+  {
+    contact_lock_release(&lock);
+    // Best-effort cleanup now that nothing holds it - the contact no
+    // longer exists, so there's no reuse-race concern in unlinking it.
+    char lock_path[600];
+    snprintf(lock_path, sizeof(lock_path), "%s/%s.lock", keychain_dir, name);
+    unlink(lock_path);
+  }
+
+  return result;
 }
 
 // Check if contact exists
@@ -867,29 +1128,126 @@ int load_decryption_chunk(const char *contact_name, size_t start_offset, size_t 
   return (int)bytes_read;
 }
 
-// Encrypt with contact's encryption key
-int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
+// Stream a fully-staged, verified pending artifact to the real output.
+// This is the only place ciphertext/plaintext ever reaches the caller's
+// stream - by the time it's called, the bytes being sent have already
+// been durably and verifiably written to disk, so this step can fail or
+// be interrupted freely: nothing about key state depends on it succeeding.
+static int deliver_pending_file(const char *path, FILE *output)
 {
-  Contact *c = find_contact(contact_name);
-  if (!c)
+  FILE *pf = fopen(path, "rb");
+  if (!pf)
   {
-    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    fprintf(stderr, "Error: Cannot open %s for delivery: %s\n", path, strerror(errno));
     return -1;
   }
+  unsigned char buf[65536];
+  size_t n;
+  while ((n = fread(buf, 1, sizeof(buf), pf)) > 0)
+  {
+    if (fwrite(buf, 1, n, output) != n)
+    {
+      fprintf(stderr, "Error: Failed to write output: %s\n", strerror(errno));
+      fclose(pf);
+      return -1;
+    }
+  }
+  int had_error = ferror(pf);
+  fclose(pf);
+  if (had_error)
+  {
+    fprintf(stderr, "Error: Failed reading staged output %s\n", path);
+    return -1;
+  }
+  return 0;
+}
 
-  if (c->EncryptionKeyPath[0] == '\0' || c->EncryptionKeySize == 0)
+// Encrypt with contact's encryption key
+//
+// Key consumption is committed in three atomic, verified steps, strictly
+// in this order, before the ciphertext is ever delivered to `output`:
+//   1. the finished ciphertext is staged and published as a "pending
+//      artifact" tagged with the exact key range it corresponds to
+//   2. the key file is truncated to remove the consumed prefix
+//   3. keychain.txt is updated to match
+// Only key-file-before-keychain.txt ordering is safe: if it were
+// reversed, a crash between the two would leave keychain.txt believing a
+// key range is spent while the key file still contains those exact
+// bytes, unread and reusable - a two-time-pad break. With this ordering,
+// the same crash instead leaves the key file already reduced (correct)
+// and keychain.txt merely stale, which commit_reconcile() can always
+// finish deterministically using the pending artifact's own filename tag.
+// See the "Crash-safe key consumption" section of README.md.
+//
+// Runs under an exclusive, per-contact lock (see contact_lock_acquire in
+// commit.c) so that two processes racing to encrypt for the same contact
+// can't each independently read and consume the same key bytes - a race
+// the staging/verification mechanism alone cannot detect, since both
+// would produce individually valid, individually verified output.
+static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
+                                        const char *keychain_dir,
+                                        FILE *input, FILE *output)
+{
+  if (c->EncryptionKeyPath[0] == '\0')
   {
     fprintf(stderr, "Error: Contact '%s' has no encryption key\n", contact_name);
     return -1;
   }
 
-  // EncryptionKeySize already represents remaining bytes after truncation
-  size_t available_key = c->EncryptionKeySize;
-  if (available_key == 0)
+  // Recover from any operation an earlier run left incomplete before
+  // doing anything else.
+  CommitRecovery rec;
+  commit_reconcile(keychain_dir, contact_name, "enc", c->EncryptionKeyPath,
+                    c->EncryptionKeyOffset, c->EncryptionKeySize,
+                    c->EncryptedSequence, &rec);
+
+  if (rec.action == COMMIT_RECOVER_ERROR)
+  {
+    fprintf(stderr, "Warning: discarded an unrecoverable pending encryption artifact for '%s'\n", contact_name);
+  }
+  else if (rec.action == COMMIT_RECOVER_DISCARD)
+  {
+    fprintf(stderr,
+            "Note: discarded an uncommitted pending encryption for '%s' left by an interrupted run; "
+            "no key material was used or lost.\n",
+            contact_name);
+  }
+  else if (rec.action == COMMIT_RECOVER_FINISH || rec.action == COMMIT_RECOVER_DELIVER)
+  {
+    if (rec.action == COMMIT_RECOVER_FINISH)
+    {
+      c->EncryptionKeyOffset = rec.corrected_offset;
+      c->EncryptionKeySize = rec.corrected_size;
+      c->EncryptedSequence = rec.sequence;
+      if (save_contact_meta(keychain_dir, c) != 0)
+      {
+        fprintf(stderr, "Error: Failed to finish interrupted commit for '%s'\n", contact_name);
+        return -1;
+      }
+    }
+
+    fprintf(stderr,
+            "Recovered incomplete delivery for contact '%s' (message #%zu, key range %zu-%zu): "
+            "redelivering the previously computed ciphertext now instead of processing new input. "
+            "Run the command again to encrypt new input.\n",
+            contact_name, rec.sequence, rec.range_offset, rec.range_offset + rec.range_length);
+
+    if (deliver_pending_file(rec.pending_path, output) != 0)
+    {
+      fprintf(stderr, "Error: Failed to redeliver recovered ciphertext for '%s'\n", contact_name);
+      return -1;
+    }
+    commit_discard_path(rec.pending_path);
+    return 0;
+  }
+
+  if (c->EncryptionKeySize == 0)
   {
     fprintf(stderr, "Error: No encryption key remaining for contact '%s'\n", contact_name);
     return -1;
   }
+
+  size_t available_key = c->EncryptionKeySize;
 
   // Open encryption key file (always read from beginning)
   FILE *keyfile = fopen(c->EncryptionKeyPath, "rb");
@@ -913,18 +1271,17 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
     return -1;
   }
 
-  // Spool ciphertext to a temporary file instead of writing straight to
-  // `output`. A message can span multiple chunks; if it turns out to
-  // exceed the available key on a later chunk, earlier chunks must not
-  // have already been emitted (and their key bytes must not be spent) -
-  // otherwise those already-leaked bytes would be reused by the next
-  // message, breaking one-time-pad secrecy. Only after the whole message
-  // is confirmed to fit is the spool flushed to the real output and the
-  // key consumed.
-  FILE *spool = tmpfile();
-  if (!spool)
+  // Stage the ciphertext to a durable, per-process working file. It is
+  // not yet delivered anywhere, and its final (tagged) name and any key
+  // consumption are only decided once the whole message has been
+  // processed and verified.
+  char stage_tmp_path[560];
+  snprintf(stage_tmp_path, sizeof(stage_tmp_path), "%s%c%s_enc_pending.%ld.tmp",
+           keychain_dir, PATH_SEPARATOR, contact_name, (long)getpid());
+
+  CommitStage stage;
+  if (commit_stage_open(&stage, stage_tmp_path) != 0)
   {
-    fprintf(stderr, "Error: Cannot create temporary spool file: %s\n", strerror(errno));
     free(chunk);
     free(key_chunk);
     fclose(keyfile);
@@ -951,7 +1308,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -964,7 +1321,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -974,15 +1331,14 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       chunk[i] ^= key_chunk[i];
     }
 
-    // Write encrypted chunk to the spool file (not the real output yet)
-    if (fwrite(chunk, 1, input_bytes, spool) != input_bytes)
+    // Write encrypted chunk to the staged file (not the real output yet)
+    if (commit_stage_write(&stage, chunk, input_bytes) != 0)
     {
-      fprintf(stderr, "Error: Failed to write encrypted data to spool file\n");
       free(chunk);
       free(key_chunk);
       free(last_msg_buffer);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -1003,91 +1359,123 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   }
 
   fclose(keyfile);
+  free(chunk);
+  free(key_chunk);
 
   if (total_bytes == 0)
   {
     fprintf(stderr, "Error: No input data provided\n");
-    free(chunk);
-    free(key_chunk);
     free(last_msg_buffer);
-    fclose(spool);
+    commit_stage_abort(&stage);
     return -1;
   }
 
-  // The whole message fit within the available key - flush the spooled
-  // ciphertext to the real output now.
-  rewind(spool);
-  size_t flushed;
-  while ((flushed = fread(chunk, 1, CHUNK_SIZE, spool)) > 0)
+  if (commit_stage_close_verified(&stage) != 0)
   {
-    if (fwrite(chunk, 1, flushed, output) != flushed)
-    {
-      fprintf(stderr, "Error: Failed to write encrypted data\n");
-      free(chunk);
-      free(key_chunk);
-      free(last_msg_buffer);
-      fclose(spool);
-      return -1;
-    }
+    free(last_msg_buffer);
+    return -1;
   }
-  fclose(spool);
-  free(chunk);
-  free(key_chunk);
 
-  // Truncate consumed bytes from key file
-  // Read remaining key data
+  size_t new_sequence = c->EncryptedSequence + 1;
+  size_t range_offset = c->EncryptionKeyOffset;
+
+  // Publish the verified ciphertext under its final, key-range-tagged
+  // name. Nothing has been declared "spent" yet - this is just durable
+  // evidence, safe to exist independently of what happens next.
+  char pending_final_path[600];
+  commit_pending_path(keychain_dir, contact_name, "enc", new_sequence,
+                       range_offset, total_bytes, pending_final_path, sizeof(pending_final_path));
+
+  if (commit_publish(stage.tmp_path, pending_final_path) != 0)
+  {
+    free(last_msg_buffer);
+    commit_discard_path(stage.tmp_path);
+    return -1;
+  }
+
+  commit_test_crash_point("after_pending_publish");
+
+  // Truncate consumed bytes from the key file: read what remains, stage
+  // it, verify it, and only then publish it over the real key file.
   keyfile = fopen(c->EncryptionKeyPath, "rb");
-  if (keyfile)
+  if (!keyfile || fseek(keyfile, (long)total_bytes, SEEK_SET) != 0)
   {
-    // Seek past consumed bytes
-    if (fseek(keyfile, total_bytes, SEEK_SET) == 0)
-    {
-      // Read remaining data (EncryptionKeySize already reflects current file size)
-      size_t remaining_size = c->EncryptionKeySize - total_bytes;
-      unsigned char *remaining_data = malloc(remaining_size);
-      if (remaining_data)
-      {
-        size_t read_size = fread(remaining_data, 1, remaining_size, keyfile);
-        fclose(keyfile);
-
-        // Rewrite file with only remaining data
-        keyfile = fopen(c->EncryptionKeyPath, "wb");
-        if (keyfile)
-        {
-          fwrite(remaining_data, 1, read_size, keyfile);
-          fclose(keyfile);
-        }
-        free(remaining_data);
-      }
-      else
-      {
-        fclose(keyfile);
-      }
-    }
-    else
-    {
+    fprintf(stderr, "Error: Failed to reopen encryption key for truncation\n");
+    if (keyfile)
       fclose(keyfile);
-    }
+    free(last_msg_buffer);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+  size_t remaining_size = c->EncryptionKeySize - total_bytes;
+  unsigned char *remaining_data = remaining_size ? malloc(remaining_size) : NULL;
+  if (remaining_size && !remaining_data)
+  {
+    fprintf(stderr, "Error: Memory allocation failed while truncating encryption key\n");
+    fclose(keyfile);
+    free(last_msg_buffer);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+  size_t read_size = remaining_size ? fread(remaining_data, 1, remaining_size, keyfile) : 0;
+  fclose(keyfile);
+  if (read_size != remaining_size)
+  {
+    fprintf(stderr, "Error: Failed to read remaining encryption key\n");
+    free(remaining_data);
+    free(last_msg_buffer);
+    commit_discard_path(pending_final_path);
+    return -1;
   }
 
-  // Update contact metadata
+  char key_tmp_path[560];
+  snprintf(key_tmp_path, sizeof(key_tmp_path), "%s.tmp", c->EncryptionKeyPath);
+  if (commit_write_verified(key_tmp_path, remaining_data, remaining_size) != 0)
+  {
+    free(remaining_data);
+    free(last_msg_buffer);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+  free(remaining_data);
+  if (commit_publish(key_tmp_path, c->EncryptionKeyPath) != 0)
+  {
+    free(last_msg_buffer);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+
+  commit_test_crash_point("after_key_publish");
+
+  // Update contact metadata and commit keychain.txt (key file is already
+  // committed at this point - this is the second, final half of the pair).
   if (c->LastMessageSent)
   {
     free(c->LastMessageSent);
   }
   c->LastMessageSent = last_msg_buffer;
   c->LastMessageSentSize = last_msg_size;
-  c->EncryptedSequence++;
-  c->EncryptionKeyOffset += total_bytes;
-  c->EncryptionKeySize -= total_bytes; // Reduce size after truncation
+  c->EncryptedSequence = new_sequence;
+  c->EncryptionKeyOffset = range_offset + total_bytes;
+  c->EncryptionKeySize = remaining_size;
   c->LastMessageSentAt = time(NULL);
 
-  // Save keychain
-  if (save_keychain(g_keychain.filepath) != 0)
+  if (save_contact_meta(keychain_dir, c) != 0)
   {
     fprintf(stderr, "Error: Failed to save keychain\n");
     return -1;
   }
+
+  commit_test_crash_point("after_keychain_save");
+
+  // Both commits are durable. Delivery is now a freely-retryable step
+  // that never needs to touch key material again.
+  if (deliver_pending_file(pending_final_path, output) != 0)
+  {
+    fprintf(stderr, "Error: Failed to deliver encrypted data\n");
+    return -1;
+  }
+  commit_discard_path(pending_final_path);
 
   // Print info to stderr
   fprintf(stderr, "Used %zu bytes from encryption key for contact '%s'\n", total_bytes, contact_name);
@@ -1096,8 +1484,7 @@ int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   return 0;
 }
 
-// Decrypt with contact's decryption key
-int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
+int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
 {
   Contact *c = find_contact(contact_name);
   if (!c)
@@ -1106,19 +1493,117 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
     return -1;
   }
 
-  if (c->DecryptionKeyPath[0] == '\0' || c->DecryptionKeySize == 0)
+  char keychain_dir[512];
+  if (get_keychain_dir(g_keychain.filepath, keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, contact_name) != 0)
+    return -1;
+
+  // Another process may have been holding this lock and have committed
+  // changes for this contact while we were waiting for it. `c` (and the
+  // rest of g_keychain) reflects whatever was on disk when *this*
+  // process started, which can now be stale - reload from disk before
+  // touching anything, so the operation runs against authoritative,
+  // current state rather than a snapshot from before the wait.
+  if (load_keychain(g_keychain.filepath) != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+  c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  int result = encrypt_with_contact_locked(c, contact_name, keychain_dir, input, output);
+
+  contact_lock_release(&lock);
+  return result;
+}
+
+// Decrypt with contact's decryption key
+//
+// Mirrors encrypt_with_contact's commit ordering exactly. This matters
+// even more here: unlike ciphertext, the recovered plaintext cannot be
+// re-derived once the corresponding decryption key bytes are gone, so
+// staging the verified plaintext durably before committing key
+// consumption is what stands between a crash and permanently
+// unrecoverable message loss.
+//
+// Runs under the same per-contact lock as encrypt_with_contact - see its
+// comment for why mutual exclusion is required here in addition to, not
+// instead of, the crash-safety mechanism.
+static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
+                                        const char *keychain_dir,
+                                        FILE *input, FILE *output)
+{
+  if (c->DecryptionKeyPath[0] == '\0')
   {
     fprintf(stderr, "Error: Contact '%s' has no decryption key\n", contact_name);
     return -1;
   }
 
-  // DecryptionKeySize already represents remaining bytes after truncation
-  size_t available_key = c->DecryptionKeySize;
-  if (available_key == 0)
+  CommitRecovery rec;
+  commit_reconcile(keychain_dir, contact_name, "dec", c->DecryptionKeyPath,
+                    c->DecryptionKeyOffset, c->DecryptionKeySize,
+                    c->DecryptedSequence, &rec);
+
+  if (rec.action == COMMIT_RECOVER_ERROR)
+  {
+    fprintf(stderr, "Warning: discarded an unrecoverable pending decryption artifact for '%s'\n", contact_name);
+  }
+  else if (rec.action == COMMIT_RECOVER_DISCARD)
+  {
+    fprintf(stderr,
+            "Note: discarded an uncommitted pending decryption for '%s' left by an interrupted run; "
+            "no key material was used or lost.\n",
+            contact_name);
+  }
+  else if (rec.action == COMMIT_RECOVER_FINISH || rec.action == COMMIT_RECOVER_DELIVER)
+  {
+    if (rec.action == COMMIT_RECOVER_FINISH)
+    {
+      c->DecryptionKeyOffset = rec.corrected_offset;
+      c->DecryptionKeySize = rec.corrected_size;
+      c->DecryptedSequence = rec.sequence;
+      if (save_contact_meta(keychain_dir, c) != 0)
+      {
+        fprintf(stderr, "Error: Failed to finish interrupted commit for '%s'\n", contact_name);
+        return -1;
+      }
+    }
+
+    fprintf(stderr,
+            "Recovered incomplete delivery for contact '%s' (message #%zu, key range %zu-%zu): "
+            "redelivering the previously decrypted plaintext now instead of processing new input. "
+            "Run the command again to decrypt new input.\n",
+            contact_name, rec.sequence, rec.range_offset, rec.range_offset + rec.range_length);
+
+    if (deliver_pending_file(rec.pending_path, output) != 0)
+    {
+      fprintf(stderr, "Error: Failed to redeliver recovered plaintext for '%s'\n", contact_name);
+      return -1;
+    }
+    commit_discard_path(rec.pending_path);
+    return 0;
+  }
+
+  if (c->DecryptionKeySize == 0)
   {
     fprintf(stderr, "Error: No decryption key remaining for contact '%s'\n", contact_name);
     return -1;
   }
+
+  size_t available_key = c->DecryptionKeySize;
 
   // Open decryption key file (always read from beginning)
   FILE *keyfile = fopen(c->DecryptionKeyPath, "rb");
@@ -1141,16 +1626,13 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
     return -1;
   }
 
-  // Spool plaintext to a temporary file instead of writing straight to
-  // `output`, so a message that turns out to exceed the available key on
-  // a later chunk hasn't already had earlier chunks emitted (which would
-  // leave those key bytes looking "unused" while their ciphertext was
-  // already handled downstream). See encrypt_with_contact for the same
-  // rationale.
-  FILE *spool = tmpfile();
-  if (!spool)
+  char stage_tmp_path[560];
+  snprintf(stage_tmp_path, sizeof(stage_tmp_path), "%s%c%s_dec_pending.%ld.tmp",
+           keychain_dir, PATH_SEPARATOR, contact_name, (long)getpid());
+
+  CommitStage stage;
+  if (commit_stage_open(&stage, stage_tmp_path) != 0)
   {
-    fprintf(stderr, "Error: Cannot create temporary spool file: %s\n", strerror(errno));
     free(chunk);
     free(key_chunk);
     fclose(keyfile);
@@ -1174,7 +1656,7 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -1186,7 +1668,7 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -1196,14 +1678,13 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
       chunk[i] ^= key_chunk[i];
     }
 
-    // Write decrypted chunk to the spool file (not the real output yet)
-    if (fwrite(chunk, 1, input_bytes, spool) != input_bytes)
+    // Write decrypted chunk to the staged file (not the real output yet)
+    if (commit_stage_write(&stage, chunk, input_bytes) != 0)
     {
-      fprintf(stderr, "Error: Failed to write decrypted data to spool file\n");
       free(chunk);
       free(key_chunk);
       fclose(keyfile);
-      fclose(spool);
+      commit_stage_abort(&stage);
       return -1;
     }
 
@@ -1211,87 +1692,150 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   }
 
   fclose(keyfile);
+  free(chunk);
+  free(key_chunk);
 
   if (total_bytes == 0)
   {
     fprintf(stderr, "Error: No input data provided\n");
-    free(chunk);
-    free(key_chunk);
-    fclose(spool);
+    commit_stage_abort(&stage);
     return -1;
   }
 
-  // The whole message fit within the available key - flush the spooled
-  // plaintext to the real output now.
-  rewind(spool);
-  size_t flushed;
-  while ((flushed = fread(chunk, 1, CHUNK_SIZE, spool)) > 0)
+  if (commit_stage_close_verified(&stage) != 0)
   {
-    if (fwrite(chunk, 1, flushed, output) != flushed)
-    {
-      fprintf(stderr, "Error: Failed to write decrypted data\n");
-      free(chunk);
-      free(key_chunk);
-      fclose(spool);
-      return -1;
-    }
+    return -1;
   }
-  fclose(spool);
-  free(chunk);
-  free(key_chunk);
 
-  // Truncate consumed bytes from key file
-  // Read remaining key data
+  size_t new_sequence = c->DecryptedSequence + 1;
+  size_t range_offset = c->DecryptionKeyOffset;
+
+  char pending_final_path[600];
+  commit_pending_path(keychain_dir, contact_name, "dec", new_sequence,
+                       range_offset, total_bytes, pending_final_path, sizeof(pending_final_path));
+
+  if (commit_publish(stage.tmp_path, pending_final_path) != 0)
+  {
+    commit_discard_path(stage.tmp_path);
+    return -1;
+  }
+
+  commit_test_crash_point("after_pending_publish");
+
+  // Truncate consumed bytes from the key file
   keyfile = fopen(c->DecryptionKeyPath, "rb");
-  if (keyfile)
+  if (!keyfile || fseek(keyfile, (long)total_bytes, SEEK_SET) != 0)
   {
-    // Seek past consumed bytes
-    if (fseek(keyfile, total_bytes, SEEK_SET) == 0)
-    {
-      // Read remaining data (DecryptionKeySize already reflects current file size)
-      size_t remaining_size = c->DecryptionKeySize - total_bytes;
-      unsigned char *remaining_data = malloc(remaining_size);
-      if (remaining_data)
-      {
-        size_t read_size = fread(remaining_data, 1, remaining_size, keyfile);
-        fclose(keyfile);
-
-        // Rewrite file with only remaining data
-        keyfile = fopen(c->DecryptionKeyPath, "wb");
-        if (keyfile)
-        {
-          fwrite(remaining_data, 1, read_size, keyfile);
-          fclose(keyfile);
-        }
-        free(remaining_data);
-      }
-      else
-      {
-        fclose(keyfile);
-      }
-    }
-    else
-    {
+    fprintf(stderr, "Error: Failed to reopen decryption key for truncation\n");
+    if (keyfile)
       fclose(keyfile);
-    }
+    commit_discard_path(pending_final_path);
+    return -1;
   }
+  size_t remaining_size = c->DecryptionKeySize - total_bytes;
+  unsigned char *remaining_data = remaining_size ? malloc(remaining_size) : NULL;
+  if (remaining_size && !remaining_data)
+  {
+    fprintf(stderr, "Error: Memory allocation failed while truncating decryption key\n");
+    fclose(keyfile);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+  size_t read_size = remaining_size ? fread(remaining_data, 1, remaining_size, keyfile) : 0;
+  fclose(keyfile);
+  if (read_size != remaining_size)
+  {
+    fprintf(stderr, "Error: Failed to read remaining decryption key\n");
+    free(remaining_data);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+
+  char key_tmp_path[560];
+  snprintf(key_tmp_path, sizeof(key_tmp_path), "%s.tmp", c->DecryptionKeyPath);
+  if (commit_write_verified(key_tmp_path, remaining_data, remaining_size) != 0)
+  {
+    free(remaining_data);
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+  free(remaining_data);
+  if (commit_publish(key_tmp_path, c->DecryptionKeyPath) != 0)
+  {
+    commit_discard_path(pending_final_path);
+    return -1;
+  }
+
+  commit_test_crash_point("after_key_publish");
 
   // Update contact metadata
-  c->DecryptedSequence++;
-  c->DecryptionKeyOffset += total_bytes;
-  c->DecryptionKeySize -= total_bytes; // Reduce size after truncation
+  c->DecryptedSequence = new_sequence;
+  c->DecryptionKeyOffset = range_offset + total_bytes;
+  c->DecryptionKeySize = remaining_size;
   c->LastMessageReceivedAt = time(NULL);
 
   // Save keychain
-  if (save_keychain(g_keychain.filepath) != 0)
+  if (save_contact_meta(keychain_dir, c) != 0)
   {
     fprintf(stderr, "Error: Failed to save keychain\n");
     return -1;
   }
+
+  commit_test_crash_point("after_keychain_save");
+
+  if (deliver_pending_file(pending_final_path, output) != 0)
+  {
+    fprintf(stderr, "Error: Failed to deliver decrypted data\n");
+    return -1;
+  }
+  commit_discard_path(pending_final_path);
 
   // Print info to stderr
   fprintf(stderr, "Used %zu bytes from decryption key for contact '%s'\n", total_bytes, contact_name);
   fprintf(stderr, "Remaining decryption key: %zu bytes\n", c->DecryptionKeySize);
 
   return 0;
+}
+
+int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
+{
+  Contact *c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    return -1;
+  }
+
+  char keychain_dir[512];
+  if (get_keychain_dir(g_keychain.filepath, keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, contact_name) != 0)
+    return -1;
+
+  // See the matching comment in encrypt_with_contact: reload from disk
+  // now that we hold the lock, since another process may have committed
+  // changes for this contact while we were waiting for it.
+  if (load_keychain(g_keychain.filepath) != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+  c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  int result = decrypt_with_contact_locked(c, contact_name, keychain_dir, input, output);
+
+  contact_lock_release(&lock);
+  return result;
 }

@@ -1,0 +1,152 @@
+/*****************************************************************************\
+ *                                                                           *
+ *   commit.h - Crash-safe, atomically-committed key consumption for OTP     *
+ *                                                                           *
+ *   Provides the durable-staging + verified-write + atomic-publish          *
+ *   primitives that let encrypt/decrypt operations survive a process        *
+ *   crash (kill, power loss) without ever risking one-time-pad key reuse.   *
+ *   See the "Crash-safe key consumption" section of README.md for the full  *
+ *   design rationale.                                                       *
+ *                                                                           *
+ *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com          *
+ *   License: Apache 2.0                                                     *
+ *                                                                           *
+ \****************************************************************************/
+
+#ifndef COMMIT_H
+#define COMMIT_H
+
+#include <stddef.h>
+#include <stdio.h>
+
+/* ---- One-shot verified buffer write -----------------------------------
+ * Writes `size` bytes of `data` to `tmp_path` (create/truncate, 0600),
+ * fsyncs it, then reopens the file and compares every byte actually on
+ * disk against `data`. On any failure the tmp file is removed and -1 is
+ * returned; the caller must not proceed to commit_publish(). On success
+ * the verified file is left at `tmp_path`, not yet published.
+ */
+int commit_write_verified(const char *tmp_path, const unsigned char *data, size_t size);
+
+/* ---- Streaming verified write (checksum-based) -------------------------
+ * For payloads produced incrementally (e.g. ciphertext streamed in 4MB
+ * chunks) where holding a second full copy in RAM to compare against
+ * would be wasteful. A CRC32 is accumulated while writing, then
+ * recomputed from a fresh read-back and compared.
+ */
+typedef struct
+{
+  FILE *f;
+  unsigned long crc;
+  size_t written;
+  char tmp_path[600];
+} CommitStage;
+
+int commit_stage_open(CommitStage *stage, const char *tmp_path);
+int commit_stage_write(CommitStage *stage, const unsigned char *data, size_t len);
+/* fsync + close + reopen + recompute CRC32 + compare. 0 on success (file
+ * left verified at stage->tmp_path), -1 on failure (tmp file removed). */
+int commit_stage_close_verified(CommitStage *stage);
+/* Close (if still open) and remove the tmp file - used on error paths. */
+void commit_stage_abort(CommitStage *stage);
+
+/* ---- Publish / discard --------------------------------------------------
+ * Atomically renames tmp_path -> final_path (must be on the same
+ * filesystem - both should live under the same keychain directory) and,
+ * on POSIX, fsyncs the containing directory so the rename itself survives
+ * a power loss and not just a process kill.
+ */
+int commit_publish(const char *tmp_path, const char *final_path);
+void commit_discard_path(const char *path);
+
+/* ---- Pending output artifacts -------------------------------------------
+ * A "pending artifact" is the fully-verified ciphertext/plaintext of one
+ * message, staged and published under a name tagged with the exact key
+ * range it corresponds to, *before* the key file and keychain.txt are
+ * committed to reflect that range as consumed. Because delivery to the
+ * real output stream is the one step this tool cannot make atomic (it
+ * doesn't control what's on the other end of stdout), key consumption is
+ * anchored to this durable local copy instead - once it exists and is
+ * verified, delivery becomes a separate, freely-retryable, idempotent
+ * step that never needs to touch key material again.
+ */
+void commit_pending_path(const char *keychain_dir, const char *contact,
+                          const char *direction, size_t sequence,
+                          size_t offset, size_t length,
+                          char *out, size_t out_size);
+
+typedef enum
+{
+  COMMIT_RECOVER_NONE = 0,   /* no leftover pending artifact */
+  COMMIT_RECOVER_DISCARD,    /* commit never started - discarded, nothing lost */
+  COMMIT_RECOVER_FINISH,     /* key file committed, keychain.txt was stale - finish it */
+  COMMIT_RECOVER_DELIVER,    /* fully committed already - just redeliver */
+  COMMIT_RECOVER_ERROR       /* state didn't match any known-safe window - discarded defensively */
+} CommitRecoverAction;
+
+typedef struct
+{
+  CommitRecoverAction action;
+  char pending_path[600];
+  size_t sequence;
+  size_t range_offset;
+  size_t range_length;
+  size_t corrected_offset; /* only meaningful for COMMIT_RECOVER_FINISH */
+  size_t corrected_size;   /* only meaningful for COMMIT_RECOVER_FINISH */
+} CommitRecovery;
+
+/* Scans `keychain_dir` for a pending artifact belonging to `contact` in
+ * `direction` ("enc" or "dec") and reconciles it against the *current*
+ * physical size of `key_file_path` and the *declared* offset/size/
+ * sequence the caller currently believes are committed (straight from the
+ * Contact struct). See README.md for the truth table this implements.
+ * Returns 0 on a decisive outcome (including NONE), -1 only for a hard
+ * I/O error while reconciling (out->action is also set to ERROR).
+ */
+int commit_reconcile(const char *keychain_dir, const char *contact,
+                      const char *direction, const char *key_file_path,
+                      size_t declared_offset, size_t declared_size,
+                      size_t declared_sequence, CommitRecovery *out);
+
+/* Removes any leftover pending artifacts for `contact` (both directions) -
+ * used when a contact is removed, so orphaned staged files don't linger. */
+void commit_discard_all_pending(const char *keychain_dir, const char *contact);
+
+/* ---- Per-contact mutual exclusion --------------------------------------
+ * Guards against two processes concurrently running encrypt/decrypt (or
+ * remove) for the *same* contact. This is a distinct problem from
+ * crash-safety: two racing processes would each independently read the
+ * same starting key offset, and each would produce individually
+ * verified, correctly-staged output - the staging/verification mechanism
+ * above has no way to know the other process's key bytes were about to
+ * be reused for a different message. Only mutual exclusion prevents that.
+ *
+ * Backed by flock() on a per-contact lock file living in the same
+ * directory as the rest of that contact's keychain data
+ * (<keychain_dir>/<contact>.lock). flock() locks are held by the kernel
+ * against the open file description and are released automatically if
+ * the holding process exits for any reason, including a crash - so,
+ * unlike a PID-file scheme, there is no stale-lock state to detect or
+ * recover from; it composes directly with the rest of this module.
+ */
+typedef struct
+{
+  int fd;
+  char path[600];
+} ContactLock;
+
+/* Blocks until the exclusive lock for `contact` is acquired. Returns 0 on
+ * success (lock->fd is open and locked), -1 on failure. */
+int contact_lock_acquire(ContactLock *lock, const char *keychain_dir, const char *contact);
+/* Releases and closes the lock. Safe to call on an already-released lock. */
+void contact_lock_release(ContactLock *lock);
+
+/* Test-only fault injection: if the OTP_TEST_CRASH_POINT environment
+ * variable is set and equals `point`, flushes all output and terminates
+ * the process immediately (as a crash would - no further commit steps
+ * run), with a distinctive exit code so tests can confirm the crash
+ * landed where intended. A no-op whenever the variable isn't set, so it
+ * has zero effect on normal operation. */
+void commit_test_crash_point(const char *point);
+
+#endif /* COMMIT_H */

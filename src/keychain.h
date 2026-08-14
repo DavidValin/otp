@@ -1,10 +1,10 @@
 /*****************************************************************************\
- *                                                                            *
+ *                                                                           *
  *   keychain.h - Keychain management for OTP contacts                       *
- *                                                                            *
- *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com           *
- *   License: Apache 2.0                                                      *
- *                                                                            *
+ *                                                                           *
+ *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com          *
+ *   License: Apache 2.0                                                     *
+ *                                                                           *
  \****************************************************************************/
 
 #ifndef KEYCHAIN_H
@@ -49,8 +49,13 @@ typedef struct
 extern Keychain g_keychain;
 
 // Keychain functions
+//
+// There is no save_keychain(): each contact's metadata is persisted to
+// its own file (<keychain_dir>/<name>.meta) internally by the functions
+// below as they modify that contact, so two different contacts can never
+// collide on a shared save. See the "Per-contact metadata files" section
+// of README.md.
 int load_keychain(const char *file_path);
-int save_keychain(const char *file_path);
 int add_contact(const char *name);
 int add_contact_with_keys(const char *name, const char *encryption_key_file, const char *decryption_key_file);
 int remove_contact(const char *name);

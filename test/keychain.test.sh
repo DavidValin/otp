@@ -4,6 +4,7 @@
 
 # Clean up any existing test keychain
 rm -f keychain.txt
+rm -rf .keychain
 
 echo ""
 echo "   - Keychain functionality"
@@ -22,10 +23,10 @@ else
   exit -1
 fi
 
-if test -f "keychain.txt"; then
-  echo "     - PASS - keychain.txt file was created"
+if test -f ".keychain/alice.meta"; then
+  echo "     - PASS - per-contact metadata file .keychain/alice.meta was created"
 else
-  echo "     ! FAIL - keychain.txt file was NOT created"
+  echo "     ! FAIL - .keychain/alice.meta was NOT created"
   exit -1
 fi
 
@@ -210,15 +211,15 @@ fi
 
 echo "     Testing persistence..."
 
-# The keychain should already be saved with alice and charlie
-# Verify by checking the file directly
-grep -q "Name=alice" keychain.txt
+# The keychain should already be saved with alice and charlie, each in
+# its own per-contact metadata file
+grep -q "Name=alice" .keychain/alice.meta
 ALICE_IN_FILE=$?
-grep -q "Name=charlie" keychain.txt
+grep -q "Name=charlie" .keychain/charlie.meta
 CHARLIE_IN_FILE=$?
 
 if [ $ALICE_IN_FILE -eq 0 ] && [ $CHARLIE_IN_FILE -eq 0 ]; then
-  echo "     - PASS - contacts persisted to file"
+  echo "     - PASS - contacts persisted to their own metadata files"
 else
   echo "     ! FAIL - contacts not properly persisted"
   exit -1
@@ -296,8 +297,9 @@ fi
 
 echo "     Testing encryption with contact..."
 
-# Create a contact with keys for testing
+# Create a contact with keys for testing (fresh keychain from here on)
 rm -f keychain.txt
+rm -rf .keychain
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 enctest dectest > /dev/null 2>&1
 rm tmpkey
@@ -597,77 +599,74 @@ fi
 
 echo "     Testing full round-trip with separate keychains..."
 
-# Clean up and generate fresh keys
-rm -f keychain.txt alice_keychain.txt bob_keychain.txt
+# Simulate two independent machines: with per-contact metadata files,
+# Alice's "bob" contact and Bob's "alice" contact have different names
+# and could technically coexist in one shared .keychain/ - but a real
+# round-trip test should model Alice and Bob as genuinely separate
+# people, each with their own keychain directory, not sharing storage at
+# all. Each gets its own working directory (and therefore its own
+# .keychain/).
+OTP_BIN="$(pwd)/bin/otp"
+rm -rf alice_home bob_home
+mkdir -p alice_home bob_home
+
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
-cat tmpkey | ./bin/otp --new-key-pair 1 alice bob > /dev/null 2>&1
+cat tmpkey | "$OTP_BIN" --new-key-pair 1 alice bob > /dev/null 2>&1
 rm tmpkey
 
-# Alice's keychain setup
-cp keychain.txt alice_keychain.txt 2>/dev/null || touch alice_keychain.txt
-./bin/otp --add-contact bob encryption_alice.txt decryption_alice.txt > /dev/null 2>&1
-cp keychain.txt alice_keychain.txt
+# Alice receives her half of the key pair, Bob receives his
+mv encryption_alice.txt decryption_alice.txt alice_home/
+mv encryption_bob.txt decryption_bob.txt bob_home/
 
-# Bob's keychain setup
-cp alice_keychain.txt keychain.txt 2>/dev/null || touch keychain.txt
-rm keychain.txt
-touch keychain.txt
-./bin/otp --add-contact alice encryption_bob.txt decryption_bob.txt > /dev/null 2>&1
-cp keychain.txt bob_keychain.txt
+(cd alice_home && "$OTP_BIN" --add-contact bob encryption_alice.txt decryption_alice.txt > /dev/null 2>&1)
+(cd bob_home && "$OTP_BIN" --add-contact alice encryption_bob.txt decryption_bob.txt > /dev/null 2>&1)
 
 # Test 1: Alice encrypts to Bob
-cp alice_keychain.txt keychain.txt
 ALICE_MSG="Top secret message from Alice"
-echo -n "$ALICE_MSG" | ./bin/otp -c bob --encrypt 2>/dev/null > roundtrip_msg1.bin
-cp keychain.txt alice_keychain.txt
+(cd alice_home && echo -n "$ALICE_MSG" | "$OTP_BIN" -c bob --encrypt 2>/dev/null > ../roundtrip_msg1.bin)
 
 # Test 2: Bob decrypts Alice's message
-cp bob_keychain.txt keychain.txt
-BOB_DECRYPTED=$(cat roundtrip_msg1.bin | ./bin/otp -c alice --decrypt 2>/dev/null)
-cp keychain.txt bob_keychain.txt
+BOB_DECRYPTED=$(cd bob_home && cat ../roundtrip_msg1.bin | "$OTP_BIN" -c alice --decrypt 2>/dev/null)
 
 if [ "$BOB_DECRYPTED" = "$ALICE_MSG" ]; then
   echo "     - PASS - round-trip Alice->Bob successful"
 else
   echo "     ! FAIL - round-trip failed (expected '$ALICE_MSG', got '$BOB_DECRYPTED')"
-  exit -1
+  exit 1
 fi
 
 # Test 3: Bob encrypts reply to Alice
-cp bob_keychain.txt keychain.txt
 BOB_MSG="Confirmed. Reply from Bob."
-echo -n "$BOB_MSG" | ./bin/otp -c alice --encrypt 2>/dev/null > roundtrip_msg2.bin
-cp keychain.txt bob_keychain.txt
+(cd bob_home && echo -n "$BOB_MSG" | "$OTP_BIN" -c alice --encrypt 2>/dev/null > ../roundtrip_msg2.bin)
 
 # Test 4: Alice decrypts Bob's reply
-cp alice_keychain.txt keychain.txt
-ALICE_DECRYPTED=$(cat roundtrip_msg2.bin | ./bin/otp -c bob --decrypt 2>/dev/null)
-cp keychain.txt alice_keychain.txt
+ALICE_DECRYPTED=$(cd alice_home && cat ../roundtrip_msg2.bin | "$OTP_BIN" -c bob --decrypt 2>/dev/null)
 
 if [ "$ALICE_DECRYPTED" = "$BOB_MSG" ]; then
   echo "     - PASS - round-trip Bob->Alice successful"
 else
   echo "     ! FAIL - round-trip failed (expected '$BOB_MSG', got '$ALICE_DECRYPTED')"
-  exit -1
+  exit 1
 fi
 
 # Verify both parties have correct sequence numbers
-cp alice_keychain.txt keychain.txt
-ALICE_ENC_SEQ=$(./bin/otp -sc bob 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
-ALICE_DEC_SEQ=$(./bin/otp -sc bob 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
-cp bob_keychain.txt keychain.txt
-BOB_ENC_SEQ=$(./bin/otp -sc alice 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
-BOB_DEC_SEQ=$(./bin/otp -sc alice 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
+ALICE_ENC_SEQ=$(cd alice_home && "$OTP_BIN" -sc bob 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
+ALICE_DEC_SEQ=$(cd alice_home && "$OTP_BIN" -sc bob 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
+BOB_ENC_SEQ=$(cd bob_home && "$OTP_BIN" -sc alice 2>/dev/null | grep "EncryptedSequence:" | awk '{print $2}')
+BOB_DEC_SEQ=$(cd bob_home && "$OTP_BIN" -sc alice 2>/dev/null | grep "DecryptedSequence:" | awk '{print $2}')
 
 # Alice sent 1, received 1; Bob sent 1, received 1
 if [ "$ALICE_ENC_SEQ" = "1" ] && [ "$ALICE_DEC_SEQ" = "1" ] && [ "$BOB_ENC_SEQ" = "1" ] && [ "$BOB_DEC_SEQ" = "1" ]; then
   echo "     - PASS - both parties have correct sequence numbers"
 else
   echo "     ! FAIL - sequence numbers incorrect (Alice enc:$ALICE_ENC_SEQ dec:$ALICE_DEC_SEQ, Bob enc:$BOB_ENC_SEQ dec:$BOB_DEC_SEQ)"
-  exit -1
+  exit 1
 fi
 
 echo "     - PASS - full bidirectional communication verified"
+
+rm -rf alice_home bob_home
+rm -f roundtrip_msg1.bin roundtrip_msg2.bin
 
 # -----------------------------------------------------------------------------
 #  cleanup
@@ -676,6 +675,7 @@ echo "     - PASS - full bidirectional communication verified"
 echo "     Cleaning up test files..."
 
 rm -f keychain.txt alice_keychain.txt bob_keychain.txt
+rm -rf .keychain
 rm -f encryption_testalice.txt decryption_testalice.txt
 rm -f encryption_testbob.txt decryption_testbob.txt
 rm -f encryption_enctest.txt decryption_enctest.txt

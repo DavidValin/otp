@@ -35,6 +35,7 @@
 #endif
 
 #include "keychain.h"
+#include "platform.h"
 
 #ifndef _WIN32
 #define O_BINARY 0
@@ -65,8 +66,9 @@
 #ifndef O_BINARY
 #define O_BINARY _O_BINARY
 #endif
-/* Define flock as a no-op on Windows */
-static inline int flock(int fd, int lock) { return 0; }
+/* flock()/LOCK_EX come from platform.h - a real LockFileEx-backed
+ * implementation, not a no-op, so the direct key-file mode gets the same
+ * locking guarantee on Windows as it already has on POSIX. */
 /* Map fstat to _fstat */
 /* Map struct stat to _stat */
 #ifndef _MSC_VER
@@ -77,7 +79,6 @@ struct stat;
 #define open _open
 #define fstat _fstat
 #define getpid _getpid
-#define LOCK_EX 0
 #endif
 #ifndef O_BINARY
 #define O_BINARY 0
