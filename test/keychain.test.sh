@@ -466,6 +466,90 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+#  test error: message spanning multiple streaming chunks must not leak or
+#  consume key material when it exceeds the key size (regression test - the
+#  streaming loop processes input in 4MB chunks; a message that only
+#  overflows the key on a *later* chunk must not have already emitted
+#  earlier chunks or advanced the key offset/sequence, otherwise those key
+#  bytes would silently look "unused" while their ciphertext was already
+#  produced, allowing them to be reused for a later message)
+# -----------------------------------------------------------------------------
+
+echo "     Testing multi-chunk message exceeding key size does not consume key..."
+
+# Key spans more than one 4MB streaming chunk
+dd if=/dev/urandom of=multichunk_key.txt bs=1M count=5 2>/dev/null
+./bin/otp --add-contact multichunktest multichunk_key.txt multichunk_key.txt > /dev/null 2>&1
+
+# Message also spans multiple 4MB chunks and exceeds the 5MB key only once
+# the second chunk is read - with the bug, the first 4MB chunk would already
+# have been written to real output before the overflow on the second chunk
+# was detected, leaking usable ciphertext for key bytes that still look
+# "unused" to the keychain.
+dd if=/dev/urandom of=bigmsg.txt bs=1M count=10 2>/dev/null
+
+./bin/otp -c multichunktest --encrypt < bigmsg.txt > multichunk_partial_output.bin 2>/dev/null
+RC=$?
+if [ $RC -ne 0 ]; then
+  echo "     - PASS - error when multi-chunk message exceeds key size"
+else
+  echo "     ! FAIL - should error when multi-chunk message exceeds key size"
+  exit -1
+fi
+
+# Critical check: a failed attempt must not have emitted ANY ciphertext to
+# the real output, even partially. This is the actual regression: earlier
+# chunks were previously flushed to output before the overflow on a later
+# chunk was discovered, leaking ciphertext for key bytes the keychain still
+# considered unused.
+PARTIAL_SIZE=$(wc -c < multichunk_partial_output.bin | tr -d ' ')
+if [ "$PARTIAL_SIZE" = "0" ]; then
+  echo "     - PASS - no partial ciphertext leaked to output on failure"
+else
+  echo "     ! FAIL - $PARTIAL_SIZE bytes of ciphertext leaked to output despite failure (key reuse risk)"
+  exit -1
+fi
+
+# Key material must be completely untouched by the failed attempt
+OUTPUT=$(./bin/otp --show-contact multichunktest)
+echo "$OUTPUT" | grep -q "EncryptedSequence: 0"
+if [ $? -eq 0 ]; then
+  echo "     - PASS - sequence not incremented after multi-chunk failure"
+else
+  echo "     ! FAIL - sequence incremented after multi-chunk failure (key was consumed)"
+  exit -1
+fi
+
+echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 0"
+if [ $? -eq 0 ]; then
+  echo "     - PASS - encryption key offset unchanged after multi-chunk failure"
+else
+  echo "     ! FAIL - encryption key offset advanced after multi-chunk failure (key bytes leaked)"
+  exit -1
+fi
+
+# Encrypt a small message that fits within the key. If the earlier failed
+# attempt had leaked/consumed the first chunk's key bytes, this message
+# would now be encrypted with the wrong (already-used) key bytes instead of
+# the key's true, untouched starting bytes.
+dd if=/dev/urandom of=smallmsg.txt bs=1 count=100 2>/dev/null
+./bin/otp -c multichunktest --encrypt < smallmsg.txt > multichunk_cipher.bin 2>/dev/null
+
+dd if=multichunk_key.txt of=multichunk_key_prefix.txt bs=1 count=100 2>/dev/null
+./bin/otp multichunk_key_prefix.txt < smallmsg.txt > expected_cipher.bin 2>/dev/null
+
+cmp -s multichunk_cipher.bin expected_cipher.bin
+if [ $? -eq 0 ]; then
+  echo "     - PASS - key material was not leaked or desynced by the failed multi-chunk attempt"
+else
+  echo "     ! FAIL - encrypted output does not match expected ciphertext (key was reused/desynced)"
+  exit -1
+fi
+
+rm -f multichunk_key.txt multichunk_key_prefix.txt bigmsg.txt smallmsg.txt multichunk_partial_output.bin
+rm -f multichunk_cipher.bin expected_cipher.bin multichunk_key_prefix.txt.*.next
+
+# -----------------------------------------------------------------------------
 #  test error: missing --encrypt or --decrypt flag
 # -----------------------------------------------------------------------------
 
