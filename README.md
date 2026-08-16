@@ -67,7 +67,7 @@ cmp encryption_alice.txt encryption_bob.txt   # must DIFFER
 
 See [Two keys per contact](#two-keys-per-contact-mirrored-between-the-two-parties) for why the roles are split this way.
 
-`--add-contact` refuses two key files holding the same bytes, since one pad serving both directions means the range that encrypts an outgoing message also decrypts an incoming one. The comparison is by content, so passing a copy under a different name is rejected too.
+`--add-contact` refuses two key files that overlap, since one pad serving both directions means the range that encrypts an outgoing message also decrypts an incoming one. The comparison is by content, not by name or size, so all three forms are rejected: the same file twice, a copy under a different name, and - the easy mistake to make - a pad paired with part of itself. Key here is consumed from the front, so a `.next` file or a partially consumed key from `.keychain/` is the *tail* of the pad it came from; both alignments are checked over the whole of the shorter file, and differing sizes are no longer taken as proof that two keys are unrelated. Comparison stops at the first differing byte, so two independent pads cost about a megabyte of reads however large they are.
 
 #### True Random key generator
 

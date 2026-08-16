@@ -158,58 +158,100 @@ static int copy_key_file(const char *src_path, const char *dst_path)
 //
 // Compared by content rather than by path: a copy (cp k.bin k2.bin) is
 // exactly as dangerous as passing the same filename twice, and a path
-// comparison would miss it, as would an inode comparison. Differing sizes
-// settle it without reading anything, which is the common case.
+// comparison would miss it, as would an inode comparison.
+//
+// Equal size is NOT a precondition for danger, so it is not used as a
+// shortcut. Key material here is consumed from the front and the file is
+// truncated, so the natural leftovers of this tool - a ".next" file from
+// the direct key-file mode, a partially consumed key from .keychain/ -
+// are *suffixes* of the pad they came from. Handing over a pad and its
+// own leftover is overlap just as total as handing over the same file
+// twice, and the sizes differ precisely because some of it was already
+// spent. A truncated head of a pad is the mirror image of that case.
+//
+// Both alignments are therefore compared over the whole of the shorter
+// file: the two fronts against each other (prefix), and the two tails
+// against each other (suffix). Comparison stops at the first differing
+// byte, so two genuinely independent pads cost about one chunk of I/O no
+// matter how large they are - it is only actually-overlapping files that
+// are read to the end.
 #define KEY_COMPARE_CHUNK (1024 * 1024)
-static int key_files_have_same_content(const char *path_a, const char *path_b,
-                                       size_t size_a, size_t size_b)
+
+typedef enum
 {
-  if (size_a != size_b)
+  KEY_OVERLAP_NONE = 0,
+  KEY_OVERLAP_IDENTICAL, // same size, same bytes
+  KEY_OVERLAP_PREFIX,    // the shorter file is the head of the longer
+  KEY_OVERLAP_SUFFIX     // the shorter file is the tail of the longer
+} KeyOverlap;
+
+// Compare `length` bytes of two files, each starting at its own offset.
+// Returns 1 if every byte matches, 0 on any difference or I/O failure.
+static int file_ranges_equal(const char *path_a, size_t offset_a,
+                             const char *path_b, size_t offset_b,
+                             size_t length)
+{
+  if (length == 0)
     return 0;
 
   FILE *fa = fopen(path_a, "rb");
   FILE *fb = fopen(path_b, "rb");
-  if (!fa || !fb)
-  {
-    // Unreadable here means the copy below will fail and report properly;
-    // don't claim they differ on the strength of a failed comparison.
-    if (fa)
-      fclose(fa);
-    if (fb)
-      fclose(fb);
-    return 0;
-  }
-
   unsigned char *buf_a = malloc(KEY_COMPARE_CHUNK);
   unsigned char *buf_b = malloc(KEY_COMPARE_CHUNK);
-  int same = 1;
-  if (!buf_a || !buf_b)
-    same = 0; // can't prove identity; the copy step will still succeed
-  else
+
+  // A failure to read or allocate here cannot prove the ranges differ,
+  // and must not be reported as if it had: the copy step that follows
+  // will hit the same problem and report it properly.
+  int equal = (fa && fb && buf_a && buf_b);
+
+  // otp_fseek(), not fseek(): fseek() takes a long, which is 32-bit on
+  // Windows even in 64-bit builds, so a tail comparison on a key over
+  // 2GB would silently start in the wrong place.
+  if (equal && (otp_fseek(fa, offset_a) != 0 || otp_fseek(fb, offset_b) != 0))
+    equal = 0;
+
+  size_t left = length;
+  while (equal && left > 0)
   {
-    size_t left = size_a;
-    while (left > 0)
-    {
-      size_t want = (left < KEY_COMPARE_CHUNK) ? left : KEY_COMPARE_CHUNK;
-      if (fread(buf_a, 1, want, fa) != want || fread(buf_b, 1, want, fb) != want)
-      {
-        same = 0;
-        break;
-      }
-      if (memcmp(buf_a, buf_b, want) != 0)
-      {
-        same = 0;
-        break;
-      }
+    size_t want = (left < KEY_COMPARE_CHUNK) ? left : KEY_COMPARE_CHUNK;
+    if (fread(buf_a, 1, want, fa) != want || fread(buf_b, 1, want, fb) != want)
+      equal = 0;
+    else if (memcmp(buf_a, buf_b, want) != 0)
+      equal = 0;
+    else
       left -= want;
-    }
   }
 
   free(buf_a);
   free(buf_b);
-  fclose(fa);
-  fclose(fb);
-  return same;
+  if (fa)
+    fclose(fa);
+  if (fb)
+    fclose(fb);
+  return equal;
+}
+
+static KeyOverlap key_files_overlap(const char *path_a, const char *path_b,
+                                    size_t size_a, size_t size_b)
+{
+  size_t shorter = (size_a < size_b) ? size_a : size_b;
+  if (shorter == 0)
+    return KEY_OVERLAP_NONE;
+
+  // Fronts aligned. With equal sizes this is a whole-file comparison and
+  // settles the identical case outright.
+  if (file_ranges_equal(path_a, 0, path_b, 0, shorter))
+    return (size_a == size_b) ? KEY_OVERLAP_IDENTICAL : KEY_OVERLAP_PREFIX;
+
+  if (size_a == size_b)
+    return KEY_OVERLAP_NONE;
+
+  // Tails aligned: the shorter file against the last `shorter` bytes of
+  // the longer one. This is the ".next"/partially-consumed-key case.
+  if (file_ranges_equal(path_a, size_a - shorter, path_b, size_b - shorter, shorter))
+    return KEY_OVERLAP_SUFFIX;
+
+  return KEY_OVERLAP_NONE;
 }
 
 // A contact name that has been used before is a reuse hazard the program
@@ -785,15 +827,25 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
     return -1;
   }
 
-  if (key_files_have_same_content(encryption_key_file, decryption_key_file, enc_size, dec_size))
+  KeyOverlap overlap = key_files_overlap(encryption_key_file, decryption_key_file,
+                                         enc_size, dec_size);
+  if (overlap != KEY_OVERLAP_NONE)
   {
     fprintf(stderr,
-            "Error: '%s' and '%s' contain the same key material. A contact needs two DIFFERENT "
+            "Error: '%s' and '%s' contain the same key material%s. A contact needs two DIFFERENT "
             "one-time pads - one for sending, one for receiving. Using one pad for both means the "
             "bytes that encrypt an outgoing message also decrypt an incoming one, so the same key "
             "range covers two messages and the pad is broken. Generate a pair with "
             "--new-key-pair, which produces the two distinct keys this expects.\n",
-            encryption_key_file, decryption_key_file);
+            encryption_key_file, decryption_key_file,
+            overlap == KEY_OVERLAP_IDENTICAL
+                ? ""
+                : (overlap == KEY_OVERLAP_PREFIX
+                       ? " - the smaller file is the beginning of the larger one, so the whole of it "
+                         "is key that the larger file also covers"
+                       : " - the smaller file is the tail of the larger one, which is what a partially "
+                         "consumed key or a \".next\" file looks like; every byte it holds is still "
+                         "present in the larger file"));
     return -1;
   }
 
@@ -1042,118 +1094,6 @@ void show_contact(const char *name)
     printf("  LastMessageReceivedAt: never\n");
   }
   printf("\n");
-}
-
-// Load encryption chunk
-int load_encryption_chunk(const char *contact_name, size_t start_offset, size_t end_offset,
-                          unsigned char *buffer, size_t buffer_size)
-{
-  Contact *c = find_contact(contact_name);
-  if (!c)
-  {
-    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
-    return -1;
-  }
-
-  if (c->EncryptionKeyPath[0] == '\0' || c->EncryptionKeySize == 0)
-  {
-    fprintf(stderr, "Error: Contact '%s' has no encryption key\n", contact_name);
-    return -1;
-  }
-
-  if (start_offset >= c->EncryptionKeySize)
-  {
-    fprintf(stderr, "Error: Start offset %zu exceeds key size %zu\n",
-            start_offset, c->EncryptionKeySize);
-    return -1;
-  }
-
-  size_t actual_end = (end_offset < c->EncryptionKeySize) ? end_offset : c->EncryptionKeySize;
-  size_t chunk_size = actual_end - start_offset;
-
-  if (chunk_size > buffer_size)
-  {
-    fprintf(stderr, "Error: Buffer too small for chunk\n");
-    return -1;
-  }
-
-  // Read from file
-  FILE *keyfile = fopen(c->EncryptionKeyPath, "rb");
-  if (!keyfile)
-  {
-    fprintf(stderr, "Error: Cannot open encryption key file\n");
-    return -1;
-  }
-
-  // otp_fseek(), not fseek(): fseek() takes a long, which is 32-bit on
-  // Windows even in 64-bit builds, so a seek past 2GB into a large key
-  // would silently land in the wrong place.
-  if (otp_fseek(keyfile, start_offset) != 0)
-  {
-    fclose(keyfile);
-    return -1;
-  }
-
-  size_t bytes_read = fread(buffer, 1, chunk_size, keyfile);
-  fclose(keyfile);
-
-  return (int)bytes_read;
-}
-
-// Load decryption chunk
-int load_decryption_chunk(const char *contact_name, size_t start_offset, size_t end_offset,
-                          unsigned char *buffer, size_t buffer_size)
-{
-  Contact *c = find_contact(contact_name);
-  if (!c)
-  {
-    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
-    return -1;
-  }
-
-  if (c->DecryptionKeyPath[0] == '\0' || c->DecryptionKeySize == 0)
-  {
-    fprintf(stderr, "Error: Contact '%s' has no decryption key\n", contact_name);
-    return -1;
-  }
-
-  if (start_offset >= c->DecryptionKeySize)
-  {
-    fprintf(stderr, "Error: Start offset %zu exceeds key size %zu\n",
-            start_offset, c->DecryptionKeySize);
-    return -1;
-  }
-
-  size_t actual_end = (end_offset < c->DecryptionKeySize) ? end_offset : c->DecryptionKeySize;
-  size_t chunk_size = actual_end - start_offset;
-
-  if (chunk_size > buffer_size)
-  {
-    fprintf(stderr, "Error: Buffer too small for chunk\n");
-    return -1;
-  }
-
-  // Read from file
-  FILE *keyfile = fopen(c->DecryptionKeyPath, "rb");
-  if (!keyfile)
-  {
-    fprintf(stderr, "Error: Cannot open decryption key file\n");
-    return -1;
-  }
-
-  // otp_fseek(), not fseek(): fseek() takes a long, which is 32-bit on
-  // Windows even in 64-bit builds, so a seek past 2GB into a large key
-  // would silently land in the wrong place.
-  if (otp_fseek(keyfile, start_offset) != 0)
-  {
-    fclose(keyfile);
-    return -1;
-  }
-
-  size_t bytes_read = fread(buffer, 1, chunk_size, keyfile);
-  fclose(keyfile);
-
-  return (int)bytes_read;
 }
 
 // Stream a fully-staged, verified pending artifact to the real output.

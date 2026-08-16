@@ -319,19 +319,53 @@ void commit_pending_path(const char *keychain_dir, const char *contact,
            keychain_dir, contact, direction, sequence, offset, length);
 }
 
+/* Match a published artifact name *in full*.
+ *
+ * Matching the prefix and taking sscanf's return value alone is not
+ * enough, and the difference is a cross-contact bug rather than a
+ * cosmetic one. sscanf() reports how many conversions it assigned, not
+ * whether the trailing literal matched, so "1_off0_len3_enc_pending_seq4_
+ * off0_len9.bin" satisfies "%zu_off%zu_len%zu.bin" with a return of 3.
+ * Contact names may legally contain '_' and digits, so a contact named
+ * "x_enc_pending_seq1_off0_len3" produces artifacts that contact "x"
+ * would then claim as its own - and either unlink them or redeliver
+ * them, which on the decrypt side means handing out another contact's
+ * plaintext.
+ *
+ * "%n" records how far the scan actually got; requiring it to land on
+ * the terminating NUL is what makes the name unambiguous. It is only
+ * assigned when every preceding directive - including the ".bin"
+ * literal - matched, so it must be pre-set to -1 and checked. */
 static int parse_pending_name(const char *name, const char *prefix,
                                size_t *seq, size_t *off, size_t *len)
 {
   size_t prefix_len = strlen(prefix);
   if (strncmp(name, prefix, prefix_len) != 0)
     return 0;
-  return sscanf(name + prefix_len, "%zu_off%zu_len%zu.bin", seq, off, len) == 3;
+
+  const char *rest = name + prefix_len;
+  int consumed = -1;
+  if (sscanf(rest, "%zu_off%zu_len%zu.bin%n", seq, off, len, &consumed) != 3)
+    return 0;
+  return consumed >= 0 && rest[consumed] == '\0';
 }
 
-static int has_suffix(const char *name, const char *suffix)
+/* Match an abandoned staging name in full: <stage_prefix><pid>.tmp, where
+ * the pid part must be all digits and nothing else. Same reasoning as
+ * parse_pending_name - a prefix test alone would let one contact sweep
+ * another contact's in-flight staging file. */
+static int parse_stage_name(const char *name, const char *stage_prefix)
 {
-  size_t n = strlen(name), s = strlen(suffix);
-  return n >= s && strcmp(name + n - s, suffix) == 0;
+  size_t prefix_len = strlen(stage_prefix);
+  if (strncmp(name, stage_prefix, prefix_len) != 0)
+    return 0;
+
+  const char *p = name + prefix_len;
+  if (*p < '0' || *p > '9')
+    return 0;
+  while (*p >= '0' && *p <= '9')
+    p++;
+  return strcmp(p, ".tmp") == 0;
 }
 
 /* Build the two name fragments that identify everything one direction of
@@ -383,8 +417,7 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
     /* Sweep abandoned staging files first. These are never recoverable -
      * an unfinished, unverified write - but they can be large and, when
      * left by an interrupted decrypt, they contain plaintext. */
-    if (strncmp(entry->d_name, stage_prefix, strlen(stage_prefix)) == 0 &&
-        has_suffix(entry->d_name, ".tmp"))
+    if (parse_stage_name(entry->d_name, stage_prefix))
     {
       char stale_path[600];
       snprintf(stale_path, sizeof(stale_path), "%s/%s", keychain_dir, entry->d_name);
@@ -477,21 +510,36 @@ void commit_discard_all_pending(const char *keychain_dir, const char *contact)
   if (!d)
     return;
 
-  /* Match on the shared "<contact>_<dir>_pending" stem so this covers
-   * both published artifacts and abandoned staging files
-   * (<contact>_<dir>_pending.<pid>.tmp). This is the only thing that ever
-   * revisits a dead process's pid-tagged name, so anything it misses
-   * stays on disk forever - and on the decrypt side that file holds
-   * recovered plaintext. */
-  char prefix_enc[300], prefix_dec[300];
-  snprintf(prefix_enc, sizeof(prefix_enc), "%s_enc_pending", contact);
-  snprintf(prefix_dec, sizeof(prefix_dec), "%s_dec_pending", contact);
+  /* Covers both published artifacts and abandoned staging files
+   * (<contact>_<dir>_pending.<pid>.tmp) in both directions. This is the
+   * only thing that ever revisits a dead process's pid-tagged name, so
+   * anything it misses stays on disk forever - and on the decrypt side
+   * that file holds recovered plaintext.
+   *
+   * Names are matched in full rather than by prefix, for the reason
+   * given above parse_pending_name: a prefix test would also delete the
+   * artifacts of any *other* contact whose name happens to begin with
+   * this one's, including that contact's staged plaintext. */
+  const char *directions[2] = {"enc", "dec"};
 
   struct dirent *entry;
   while ((entry = readdir(d)) != NULL)
   {
-    if (strncmp(entry->d_name, prefix_enc, strlen(prefix_enc)) == 0 ||
-        strncmp(entry->d_name, prefix_dec, strlen(prefix_dec)) == 0)
+    int matched = 0;
+    for (int i = 0; i < 2 && !matched; i++)
+    {
+      char artifact_prefix[300], stage_prefix[300];
+      size_t seq, off, len;
+      build_pending_prefixes(contact, directions[i],
+                             artifact_prefix, sizeof(artifact_prefix),
+                             stage_prefix, sizeof(stage_prefix));
+
+      if (parse_pending_name(entry->d_name, artifact_prefix, &seq, &off, &len) ||
+          parse_stage_name(entry->d_name, stage_prefix))
+        matched = 1;
+    }
+
+    if (matched)
     {
       char full_path[600];
       snprintf(full_path, sizeof(full_path), "%s/%s", keychain_dir, entry->d_name);

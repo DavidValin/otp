@@ -19,6 +19,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -83,6 +84,54 @@ struct stat;
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
+
+/* --new-key-pair writes four files; the two pads it draws from stdin are
+ * each written to two of them. Close and remove every one created so
+ * far: a half-written set is not usable as a pad, and leaving it behind
+ * would also block the retry with EEXIST, since these are created
+ * O_EXCL. remove() rather than unlink() - it is standard C and needs no
+ * per-platform mapping. */
+#define KEYPAIR_FILES 4
+static void keypair_cleanup(FILE *files[KEYPAIR_FILES], char names[KEYPAIR_FILES][256])
+{
+  for (int i = 0; i < KEYPAIR_FILES; i++)
+  {
+    if (files[i])
+    {
+      fclose(files[i]);
+      files[i] = NULL;
+    }
+    if (names[i][0])
+      remove(names[i]);
+  }
+}
+
+/* Stream `size` bytes from stdin into two files at once. The pad is never
+ * held whole in memory: generating a 1GB key pair used to need 2GB of
+ * RAM, which put a ceiling on key sizes far below the 1TB the keychain
+ * advertises. Peak usage here is one chunk regardless of key size. */
+#define KEYPAIR_CHUNK (1024 * 1024)
+static int keypair_stream_pad(unsigned char *buf, size_t size,
+                              FILE *dst1, FILE *dst2, const char *what)
+{
+  size_t left = size;
+  while (left > 0)
+  {
+    size_t want = (left < KEYPAIR_CHUNK) ? left : KEYPAIR_CHUNK;
+    if (fread(buf, 1, want, stdin) != want)
+    {
+      fprintf(stderr, "Error reading %s key chunk from stdin\n", what);
+      return -1;
+    }
+    if (fwrite(buf, 1, want, dst1) != want || fwrite(buf, 1, want, dst2) != want)
+    {
+      fprintf(stderr, "Error writing %s key: %s\n", what, strerror(errno));
+      return -1;
+    }
+    left -= want;
+  }
+  return 0;
+}
 
 int main(int argc, char *argv[])
 {
@@ -268,155 +317,86 @@ int main(int argc, char *argv[])
     }
     const char *part_a = argv[3];
     const char *part_b = argv[4];
+    /* Range-check before converting: a size_mb larger than size_t can
+     * represent makes the conversion below undefined, not merely wrong. */
+    if (size_mb > (double)(SIZE_MAX / (1024 * 1024)))
+    {
+      fprintf(stderr, "Size too large: %s MB\n", size_str);
+      return 1;
+    }
     size_t size = (size_t)(size_mb * 1024 * 1024 + 0.5); // round
     if (size == 0)
     {
       fprintf(stderr, "Size too small: %s MB results in 0 bytes\n", size_str);
       return 1;
     }
-    unsigned char *buf1 = malloc(size);
-    if (!buf1)
+
+    /* Part A's encryption key is Part B's decryption key and vice versa,
+     * so each of the two pads read from stdin is written to two files.
+     * Created in this order, all O_EXCL and 0600. */
+    char names[KEYPAIR_FILES][256] = {{0}};
+    FILE *files[KEYPAIR_FILES] = {0};
+    snprintf(names[0], sizeof names[0], "encryption_%s.txt", part_a);
+    snprintf(names[1], sizeof names[1], "decryption_%s.txt", part_a);
+    snprintf(names[2], sizeof names[2], "encryption_%s.txt", part_b);
+    snprintf(names[3], sizeof names[3], "decryption_%s.txt", part_b);
+
+    for (int i = 0; i < KEYPAIR_FILES; i++)
+    {
+      int kfd = open(names[i], O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
+      if (kfd < 0)
+      {
+        fprintf(stderr, "Error creating %s: %s\n", names[i], strerror(errno));
+        names[i][0] = '\0'; // not ours - must not be removed
+        keypair_cleanup(files, names);
+        return 1;
+      }
+      files[i] = fdopen(kfd, "wb");
+      if (!files[i])
+      {
+        fprintf(stderr, "Error fdopen %s: %s\n", names[i], strerror(errno));
+        close(kfd);
+        keypair_cleanup(files, names);
+        return 1;
+      }
+    }
+
+    unsigned char *buf = malloc(KEYPAIR_CHUNK);
+    if (!buf)
     {
       fprintf(stderr, "Memory allocation failed\n");
+      keypair_cleanup(files, names);
       return 1;
     }
-    if (fread(buf1, 1, size, stdin) != (size_t)size)
+
+    /* Pad 1 -> A's encryption key and B's decryption key.
+     * Pad 2 -> A's decryption key and B's encryption key. */
+    if (keypair_stream_pad(buf, size, files[0], files[3], "first") != 0 ||
+        keypair_stream_pad(buf, size, files[1], files[2], "second") != 0)
     {
-      fprintf(stderr, "Error reading first key chunk from stdin\n");
-      free(buf1);
+      free(buf);
+      keypair_cleanup(files, names);
       return 1;
     }
-    unsigned char *buf2 = malloc(size);
-    if (!buf2)
+    free(buf);
+
+    /* fclose() reports a failed flush, which fwrite() alone cannot: a key
+     * file that was silently truncated by a full disk would otherwise be
+     * distributed as if complete. */
+    for (int i = 0; i < KEYPAIR_FILES; i++)
     {
-      fprintf(stderr, "Memory allocation failed\n");
-      free(buf1);
-      return 1;
+      if (fclose(files[i]) != 0)
+      {
+        fprintf(stderr, "Error writing %s: %s\n", names[i], strerror(errno));
+        files[i] = NULL;
+        keypair_cleanup(files, names);
+        return 1;
+      }
+      files[i] = NULL;
     }
-    if (fread(buf2, 1, size, stdin) != (size_t)size)
-    {
-      fprintf(stderr, "Error reading second key chunk from stdin\n");
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    char fname[256];
-    // encryption_part_a
-    snprintf(fname, sizeof fname, "encryption_%s.txt", part_a);
-    int fd = open(fname, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
-    if (fd < 0)
-    {
-      fprintf(stderr, "Error creating %s: %s\n", fname, strerror(errno));
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    FILE *f = fdopen(fd, "wb");
-    if (!f)
-    {
-      fprintf(stderr, "Error fdopen %s\n", fname);
-      close(fd);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    if (fwrite(buf1, 1, size, f) != size)
-    {
-      fprintf(stderr, "Error writing %s\n", fname);
-      fclose(f);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    fclose(f);
-    // decryption_part_a
-    snprintf(fname, sizeof fname, "decryption_%s.txt", part_a);
-    fd = open(fname, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
-    if (fd < 0)
-    {
-      fprintf(stderr, "Error creating %s: %s\n", fname, strerror(errno));
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    f = fdopen(fd, "wb");
-    if (!f)
-    {
-      fprintf(stderr, "Error fdopen %s\n", fname);
-      close(fd);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    if (fwrite(buf2, 1, size, f) != size)
-    {
-      fprintf(stderr, "Error writing %s\n", fname);
-      fclose(f);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    fclose(f);
-    // encryption_part_b
-    snprintf(fname, sizeof fname, "encryption_%s.txt", part_b);
-    fd = open(fname, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
-    if (fd < 0)
-    {
-      fprintf(stderr, "Error creating %s: %s\n", fname, strerror(errno));
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    f = fdopen(fd, "wb");
-    if (!f)
-    {
-      fprintf(stderr, "Error fdopen %s\n", fname);
-      close(fd);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    if (fwrite(buf2, 1, size, f) != size)
-    {
-      fprintf(stderr, "Error writing %s\n", fname);
-      fclose(f);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    fclose(f);
-    // decryption_part_b
-    snprintf(fname, sizeof fname, "decryption_%s.txt", part_b);
-    fd = open(fname, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
-    if (fd < 0)
-    {
-      fprintf(stderr, "Error creating %s: %s\n", fname, strerror(errno));
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    f = fdopen(fd, "wb");
-    if (!f)
-    {
-      fprintf(stderr, "Error fdopen %s\n", fname);
-      close(fd);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    if (fwrite(buf1, 1, size, f) != size)
-    {
-      fprintf(stderr, "Error writing %s\n", fname);
-      fclose(f);
-      free(buf1);
-      free(buf2);
-      return 1;
-    }
-    fclose(f);
-    free(buf1);
-    free(buf2);
     return 0;
   }
+
 
   /* **************************************************************************
    *  Handles encryption / decryption via stdin + key file                    *
@@ -453,63 +433,78 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Error creating output file %s: %s\n", outfileunused, strerror(errno));
     return 1;
   }
-  FILE *unused = fdopen(out_fd, "wb");
+
+  /* Everything below shares one failure path, which removes the .next
+   * file. It is created before the key file has even been opened, so
+   * without that every error - an unreadable key, a short key, a failed
+   * write - left behind a 0-byte or half-written successor key. That is
+   * worse than leaving nothing: an empty .next file is exactly what a
+   * fully consumed key looks like, and a truncated one silently discards
+   * the key material it should have carried forward. */
+  FILE *infile = NULL;
+  FILE *unused = NULL;
+  unsigned char *keybuf = NULL;
+  int key_fd = -1;
+  size_t key_size = 0;
+  size_t used = 0;
+  struct stat ks;
+
+  unused = fdopen(out_fd, "wb");
+  if (!unused)
+  {
+    fprintf(stderr, "Error opening output file %s: %s\n", outfileunused, strerror(errno));
+    close(out_fd);
+    goto fail;
+  }
+
   /* Open and lock key file */
-  int key_fd = open(argv[optind], O_RDONLY | O_BINARY);
+  key_fd = open(argv[optind], O_RDONLY | O_BINARY);
   if (key_fd < 0)
   {
     fprintf(stderr, "Error opening key file %s: %s\n", argv[optind], strerror(errno));
-    close(out_fd);
-    return 1;
+    goto fail;
   }
   if (flock(key_fd, LOCK_EX) < 0)
   {
     fprintf(stderr, "Error locking key file %s: %s\n", argv[optind], strerror(errno));
     close(key_fd);
-    close(out_fd);
-    return 1;
+    goto fail;
   }
-  FILE *infile = fdopen(key_fd, "rb");
+  infile = fdopen(key_fd, "rb");
+  if (!infile)
+  {
+    fprintf(stderr, "Error reading key file %s: %s\n", argv[optind], strerror(errno));
+    close(key_fd);
+    goto fail;
+  }
   /* Determine key file size */
-  struct stat ks;
   if (fstat(key_fd, &ks) < 0)
   {
     fprintf(stderr, "Error statting key file %s: %s\n", argv[optind], strerror(errno));
-    fclose(infile);
-    fclose(unused);
-    return 1;
+    goto fail;
   }
   if (!S_ISREG(ks.st_mode))
   {
     fprintf(stderr, "%s is not a regular file\n", argv[optind]);
-    fclose(infile);
-    fclose(unused);
-    return 1;
+    goto fail;
   }
-  size_t key_size = ks.st_size;
+  key_size = ks.st_size;
   if (key_size == 0)
   {
     fprintf(stderr, "Key file %s is empty\n", argv[optind]);
-    fclose(infile);
-    fclose(unused);
-    return 1;
+    goto fail;
   }
   /* Read key into memory */
-  unsigned char *keybuf = malloc(key_size);
+  keybuf = malloc(key_size);
   if (!keybuf)
   {
     fprintf(stderr, "Memory allocation failed\n");
-    fclose(infile);
-    fclose(unused);
-    return 1;
+    goto fail;
   }
   if (fread(keybuf, 1, key_size, infile) != key_size)
   {
     fprintf(stderr, "Error reading key file %s\n", argv[optind]);
-    free(keybuf);
-    fclose(infile);
-    fclose(unused);
-    return 1;
+    goto fail;
   }
   /* Reset infile to start for potential further use */
   fseek(infile, 0, SEEK_SET);
@@ -517,11 +512,14 @@ int main(int argc, char *argv[])
   int first = fgetc(stdin);
   if (first == EOF)
   {
-    fprintf(stderr, "No input provided; producing empty output.\n");
-    /* Write empty .next file and exit */
-    fclose(infile);
+    /* No key was consumed, so there is no successor key to write. The
+     * .next file is removed rather than left empty, which would claim
+     * the opposite. */
+    fprintf(stderr, "No input provided; no key consumed and no %s written.\n", outfileunused);
     free(keybuf);
+    fclose(infile);
     fclose(unused);
+    remove(outfileunused);
     return 0;
   }
   /* Put the byte back for normal processing */
@@ -529,28 +527,26 @@ int main(int argc, char *argv[])
   /* Ignore SIGPIPE to handle closed pipes gracefully */
   signal(SIGPIPE, SIG_IGN);
   unsigned char outbyte;
-  size_t used = 0;
   while (fread(&outbyte, 1, 1, stdin) == 1)
   {
     if (used >= key_size)
     {
       fprintf(stderr, "Error: key file %s shorter than input.\n", argv[optind]);
-      free(keybuf);
-      fclose(infile);
-      fclose(unused);
-      return 1;
+      goto fail;
     }
     /* Encrypt current byte using key */
     outbyte ^= keybuf[used];
     if (fwrite(&outbyte, 1, 1, stdout) != 1)
     {
       fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
-      free(keybuf);
-      fclose(infile);
-      fclose(unused);
-      return 1;
+      goto fail;
     }
     used++;
+  }
+  if (ferror(stdin))
+  {
+    fprintf(stderr, "Error reading input: %s\n", strerror(errno));
+    goto fail;
   }
   /* Write remaining key bytes to the .next key file */
   if (used < key_size)
@@ -558,15 +554,42 @@ int main(int argc, char *argv[])
     if (fwrite(keybuf + used, 1, key_size - used, unused) != key_size - used)
     {
       fprintf(stderr, "Error writing remainder to %s: %s\n", outfileunused, strerror(errno));
-      free(keybuf);
-      fclose(infile);
-      fclose(unused);
-      return 1;
+      goto fail;
     }
   }
-  fflush(unused);
+
   free(keybuf);
+  keybuf = NULL;
   fclose(infile);
-  fclose(unused);
+  infile = NULL;
+
+  /* fwrite() only fills a buffer; both of these are where a full disk or
+   * a failing device actually reports itself. Without the checks, lost
+   * ciphertext and a truncated successor key both exit 0. */
+  if (fclose(unused) != 0)
+  {
+    fprintf(stderr, "Error writing %s: %s\n", outfileunused, strerror(errno));
+    unused = NULL;
+    goto fail;
+  }
+  unused = NULL;
+
+  if (fflush(stdout) != 0)
+  {
+    fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
+    /* The .next file is already closed and correct at this point; the
+     * key file is untouched, so the operation is simply retryable. */
+    remove(outfileunused);
+    return 1;
+  }
   return 0;
+
+fail:
+  free(keybuf);
+  if (infile)
+    fclose(infile);
+  if (unused)
+    fclose(unused);
+  remove(outfileunused);
+  return 1;
 }

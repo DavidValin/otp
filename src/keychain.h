@@ -15,8 +15,7 @@
 
 #define MAX_CONTACTS 10000
 #define MAX_NAME_LENGTH 256
-#define MAX_KEY_SIZE 1099511627776ULL    // 1TB max key size per contact
-#define MAX_MESSAGE_LENGTH 1073741824ULL // 1GB max message length
+#define MAX_KEY_SIZE 1099511627776ULL // 1TB max key size per contact
 #define MIN_RETRY_COUNT 0
 #define MAX_RETRY_COUNT 25000
 
@@ -72,8 +71,6 @@ int remove_contact(const char *name);
 int has_contact(const char *name);
 void list_contacts(void);
 void show_contact(const char *name);
-int load_encryption_chunk(const char *contact_name, size_t start_offset, size_t end_offset, unsigned char *buffer, size_t buffer_size);
-int load_decryption_chunk(const char *contact_name, size_t start_offset, size_t end_offset, unsigned char *buffer, size_t buffer_size);
 
 // Encryption/Decryption operations with contacts
 int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
