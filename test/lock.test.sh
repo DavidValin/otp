@@ -11,7 +11,6 @@
 # exclusion (contact_lock_acquire/release in src/commit.c, backed by
 # flock() on a per-contact lock file) prevents it.
 
-rm -f keychain.txt
 rm -rf .keychain
 
 echo ""
@@ -25,7 +24,8 @@ echo "   - Per-contact locking"
 echo "     Testing lock file location..."
 
 dd if=/dev/urandom of=lock_key1.txt bs=1 count=1000 2>/dev/null
-./bin/otp --add-contact locktest1 lock_key1.txt lock_key1.txt > /dev/null 2>&1
+dd if=/dev/urandom of=lock_key1.txt.dec bs=1 count=$(wc -c < lock_key1.txt) 2>/dev/null
+./bin/otp --add-contact locktest1 lock_key1.txt lock_key1.txt.dec > /dev/null 2>&1
 
 printf 'trigger lock creation' | ./bin/otp -c locktest1 --encrypt > /dev/null 2>/dev/null
 
@@ -38,7 +38,6 @@ else
 fi
 
 rm -f lock_key1.txt
-rm -f keychain.txt
 rm -rf .keychain
 
 # -----------------------------------------------------------------------------
@@ -51,7 +50,8 @@ rm -rf .keychain
 echo "     Testing concurrent encrypt for the same contact does not reuse key material..."
 
 dd if=/dev/urandom of=lock_key2.txt bs=1 count=4000 2>/dev/null
-./bin/otp --add-contact locktest2 lock_key2.txt lock_key2.txt > /dev/null 2>&1
+dd if=/dev/urandom of=lock_key2.txt.dec bs=1 count=$(wc -c < lock_key2.txt) 2>/dev/null
+./bin/otp --add-contact locktest2 lock_key2.txt lock_key2.txt.dec > /dev/null 2>&1
 
 printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > lock_plainA.txt
 printf 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' > lock_plainB.txt
@@ -137,12 +137,97 @@ rm -f lock_key2.txt lock_plainA.txt lock_plainB.txt lock_cipherA.bin lock_cipher
 rm -f lock_stderrA.log lock_stderrB.log
 
 # -----------------------------------------------------------------------------
+#  the same must hold for concurrent DECRYPT
+#
+#  Decryption consumes its own key file through the same code path, and
+#  two racing decrypts would each read the same starting offset just as
+#  two racing encrypts would. The lock is per contact and covers both
+#  directions, so this must be serialized identically.
+# -----------------------------------------------------------------------------
+
+echo "     Testing concurrent decrypt for the same contact does not reuse key material..."
+
+dd if=/dev/urandom of=lock_key3.txt bs=1 count=1000 2>/dev/null
+dd if=/dev/urandom of=lock_key3.txt.dec bs=1 count=$(wc -c < lock_key3.txt) 2>/dev/null
+./bin/otp --add-contact locktest3 lock_key3.txt lock_key3.txt.dec > /dev/null 2>&1
+
+# Same length, so exactly one of {0, LEN} is each output's true key range
+printf 'ciphertext block AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > lock_ctA.bin
+printf 'ciphertext block BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' > lock_ctB.bin
+
+./bin/otp -c locktest3 --decrypt < lock_ctA.bin > lock_ptA.bin 2>lock_dstderrA.log &
+DPIDA=$!
+./bin/otp -c locktest3 --decrypt < lock_ctB.bin > lock_ptB.bin 2>lock_dstderrB.log &
+DPIDB=$!
+wait $DPIDA
+DRCA=$?
+wait $DPIDB
+DRCB=$?
+
+if [ $DRCA -eq 0 ] && [ $DRCB -eq 0 ]; then
+  echo "     - PASS - both concurrent decrypts completed successfully"
+else
+  echo "     ! FAIL - a concurrent decrypt failed (A=$DRCA B=$DRCB)"
+  cat lock_dstderrA.log lock_dstderrB.log
+  exit 1
+fi
+
+find_dec_offset() {
+  CIPHERFILE=$1
+  PLAINFILE=$2
+  LEN=$(wc -c < "$CIPHERFILE" | tr -d ' ')
+  for OFF in 0 "$LEN"; do
+    dd if=lock_key3.txt.dec of=lock_dslice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
+    ./bin/otp lock_dslice.tmp < "$CIPHERFILE" > lock_dexpected.tmp 2>/dev/null
+    rm -f lock_dslice.tmp lock_dslice.tmp.*.next
+    if cmp -s lock_dexpected.tmp "$PLAINFILE"; then
+      rm -f lock_dexpected.tmp
+      echo "$OFF"
+      return
+    fi
+  done
+  rm -f lock_dexpected.tmp
+  echo "NONE"
+}
+
+DOFFA=$(find_dec_offset lock_ctA.bin lock_ptA.bin)
+DOFFB=$(find_dec_offset lock_ctB.bin lock_ptB.bin)
+
+if [ "$DOFFA" = "NONE" ] || [ "$DOFFB" = "NONE" ]; then
+  echo "     ! FAIL - a plaintext does not correspond to any expected key range"
+  exit 1
+fi
+
+if [ "$DOFFA" != "$DOFFB" ]; then
+  echo "     - PASS - the two concurrent decrypts used disjoint key ranges ($DOFFA and $DOFFB)"
+else
+  echo "     ! FAIL - both concurrent decrypts used the SAME key range ($DOFFA) - key reuse!"
+  exit 1
+fi
+
+DLEN=$(wc -c < lock_ctA.bin | tr -d ' ')
+DTOTAL=$((DLEN + DLEN))
+DOUT=$(./bin/otp --show-contact locktest3)
+DSEQ=$(echo "$DOUT" | grep -c "DecryptedSequence: 2")
+DOFF=$(echo "$DOUT" | grep -c "DecryptionKeyOffset: $DTOTAL")
+
+if [ "$DSEQ" = "1" ] && [ "$DOFF" = "1" ]; then
+  echo "     - PASS - decryption key offset and sequence count both messages exactly once"
+else
+  echo "     ! FAIL - decrypt bookkeeping wrong after concurrent operations"
+  echo "$DOUT"
+  exit 1
+fi
+
+rm -f lock_key3.txt lock_key3.txt.dec lock_ctA.bin lock_ctB.bin lock_ptA.bin lock_ptB.bin
+rm -f lock_dstderrA.log lock_dstderrB.log
+
+# -----------------------------------------------------------------------------
 #  cleanup
 # -----------------------------------------------------------------------------
 
 echo "     Cleaning up test files..."
 
-rm -f keychain.txt
 rm -rf .keychain
 
 echo ""

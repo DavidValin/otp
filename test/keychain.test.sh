@@ -3,7 +3,6 @@
 # Keychain tests for OTP
 
 # Clean up any existing test keychain
-rm -f keychain.txt
 rm -rf .keychain
 
 echo ""
@@ -298,7 +297,6 @@ fi
 echo "     Testing encryption with contact..."
 
 # Create a contact with keys for testing (fresh keychain from here on)
-rm -f keychain.txt
 rm -rf .keychain
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 enctest dectest > /dev/null 2>&1
@@ -446,7 +444,8 @@ fi
 
 # Create contact with very small key
 dd if=/dev/urandom of=smallkey.txt bs=1 count=5 2>/dev/null
-./bin/otp --add-contact smallkeytest smallkey.txt smallkey.txt > /dev/null 2>&1
+dd if=/dev/urandom of=smallkey.txt.dec bs=1 count=$(wc -c < smallkey.txt) 2>/dev/null
+./bin/otp --add-contact smallkeytest smallkey.txt smallkey.txt.dec > /dev/null 2>&1
 
 # Try to encrypt a message larger than the key
 echo -n "This message is longer than 5 bytes" | ./bin/otp -c smallkeytest --encrypt > /dev/null 2>&1
@@ -481,7 +480,8 @@ echo "     Testing multi-chunk message exceeding key size does not consume key..
 
 # Key spans more than one 4MB streaming chunk
 dd if=/dev/urandom of=multichunk_key.txt bs=1M count=5 2>/dev/null
-./bin/otp --add-contact multichunktest multichunk_key.txt multichunk_key.txt > /dev/null 2>&1
+dd if=/dev/urandom of=multichunk_key.txt.dec bs=1 count=$(wc -c < multichunk_key.txt) 2>/dev/null
+./bin/otp --add-contact multichunktest multichunk_key.txt multichunk_key.txt.dec > /dev/null 2>&1
 
 # Message also spans multiple 4MB chunks and exceeds the 5MB key only once
 # the second chunk is read - with the bug, the first 4MB chunk would already
@@ -669,12 +669,233 @@ rm -rf alice_home bob_home
 rm -f roundtrip_msg1.bin roundtrip_msg2.bin
 
 # -----------------------------------------------------------------------------
+#  contact names are used verbatim to build filenames
+#
+#  A contact's name becomes the filename of its key files, its .meta file,
+#  its .lock file and its pending artifacts - all of which are meant to
+#  stay inside .keychain/. An unvalidated name containing a path separator
+#  escaped that directory entirely, and could also make two distinct
+#  contacts share one lock file, silently defeating mutual exclusion.
+# -----------------------------------------------------------------------------
+
+echo "     Testing contact name validation..."
+
+dd if=/dev/urandom of=kc_namekey.txt bs=1 count=100 2>/dev/null
+
+./bin/otp --add-contact "../escaped" kc_namekey.txt kc_namekey.txt > /dev/null 2>kc_name_stderr.log
+RC=$?
+if [ $RC -ne 0 ] && [ ! -f "../escaped.meta" ] && [ ! -f "../escaped_enc.key" ]; then
+  echo "     - PASS - a name containing a path separator is rejected and writes nothing"
+else
+  echo "     ! FAIL - a path-traversing contact name was accepted (exit $RC)"
+  rm -f ../escaped.meta ../escaped_enc.key ../escaped_dec.key
+  exit 1
+fi
+
+grep -q "Invalid contact name" kc_name_stderr.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the rejection says why"
+else
+  echo "     ! FAIL - no explanation given for the rejected name"
+  cat kc_name_stderr.log
+  exit 1
+fi
+
+REJECTED=0
+for BAD in ".." "." "a/b" "a\\b" "a:b" "a=b" "" "a*b"; do
+  ./bin/otp --add-contact "$BAD" kc_namekey.txt kc_namekey.txt > /dev/null 2>&1
+  if [ $? -eq 0 ]; then
+    echo "     ! FAIL - invalid contact name '$BAD' was accepted"
+    exit 1
+  fi
+  REJECTED=$((REJECTED + 1))
+done
+echo "     - PASS - all $REJECTED invalid name forms rejected"
+
+# Ordinary names, including spaces and dots, must still work
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+./bin/otp --add-contact "jane.doe smith" kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
+if [ $? -eq 0 ] && [ -f ".keychain/jane.doe smith.meta" ]; then
+  echo "     - PASS - ordinary names with dots and spaces are still accepted"
+else
+  echo "     ! FAIL - a legitimate contact name was rejected"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+#  key material must never be created world-readable
+# -----------------------------------------------------------------------------
+
+echo "     Testing key file permissions..."
+
+PERM_ENC=$(ls -l ".keychain/jane.doe smith_enc.key" | cut -c1-10)
+PERM_DEC=$(ls -l ".keychain/jane.doe smith_dec.key" | cut -c1-10)
+
+if [ "$PERM_ENC" = "-rw-------" ] && [ "$PERM_DEC" = "-rw-------" ]; then
+  echo "     - PASS - copied key files are created 0600, not world-readable"
+else
+  echo "     ! FAIL - key files have permissions $PERM_ENC / $PERM_DEC (expected -rw-------)"
+  exit 1
+fi
+
+./bin/otp --remove-contact "jane.doe smith" > /dev/null 2>&1
+
+# -----------------------------------------------------------------------------
+#  a contact needs both key files or neither - one is an error
+#
+#  Accepting a single key file and quietly creating a keyless contact
+#  would report success while leaving the user believing their key was
+#  loaded.
+# -----------------------------------------------------------------------------
+
+echo "     Testing key file argument handling..."
+
+./bin/otp --add-contact halfkeyed kc_namekey.txt > /dev/null 2>kc_half_stderr.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^halfkeyed")
+
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - a single key file argument is rejected, creating nothing"
+else
+  echo "     ! FAIL - a single key file argument was accepted (exit $RC, $CREATED files)"
+  exit 1
+fi
+
+# Both forms that are legitimate must still work
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+./bin/otp --add-contact bothkeys kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
+RC1=$?
+./bin/otp --add-contact nokeys > /dev/null 2>&1
+RC2=$?
+if [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ]; then
+  echo "     - PASS - both-keys and no-keys forms still accepted"
+else
+  echo "     ! FAIL - a legitimate add-contact form was rejected ($RC1 / $RC2)"
+  exit 1
+fi
+
+# Failures must exit 1, not a raw -1 surfacing as 255
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+./bin/otp --add-contact bothkeys kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
+DUP_RC=$?
+./bin/otp --remove-contact definitely_not_here > /dev/null 2>&1
+RM_RC=$?
+if [ $DUP_RC -eq 1 ] && [ $RM_RC -eq 1 ]; then
+  echo "     - PASS - failing contact commands exit 1"
+else
+  echo "     ! FAIL - unexpected exit codes (duplicate add $DUP_RC, missing remove $RM_RC)"
+  exit 1
+fi
+
+./bin/otp --remove-contact bothkeys > /dev/null 2>&1
+./bin/otp --remove-contact nokeys > /dev/null 2>&1
+rm -f kc_namekey.txt kc_name_stderr.log kc_half_stderr.log
+
+# -----------------------------------------------------------------------------
+#  a contact must not be given the same one-time pad for both directions
+#
+#  If the encryption and decryption keys hold the same bytes, the range
+#  that encrypts an outgoing message is the same range that decrypts an
+#  incoming one - two messages covered by one pad. Comparison is by
+#  content, so a copy under a different name is caught too.
+# -----------------------------------------------------------------------------
+
+echo "     Testing rejection of identical encryption/decryption keys..."
+
+dd if=/dev/urandom of=kc_dupkey.txt bs=1 count=500 2>/dev/null
+cp kc_dupkey.txt kc_dupcopy.txt
+dd if=/dev/urandom of=kc_otherkey.txt bs=1 count=500 2>/dev/null
+
+./bin/otp --add-contact samefile kc_dupkey.txt kc_dupkey.txt > /dev/null 2>kc_dup1.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^samefile")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - the same file passed twice is rejected, creating nothing"
+else
+  echo "     ! FAIL - the same key file was accepted for both directions (exit $RC)"
+  exit 1
+fi
+
+./bin/otp --add-contact samebytes kc_dupkey.txt kc_dupcopy.txt > /dev/null 2>kc_dup2.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^samebytes")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - a copy under a different name is rejected too"
+else
+  echo "     ! FAIL - identical key content under two names was accepted (exit $RC)"
+  exit 1
+fi
+
+grep -q "contain the same key material" kc_dup2.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the refusal explains why one pad cannot serve both directions"
+else
+  echo "     ! FAIL - refusal not explained"
+  cat kc_dup2.log
+  exit 1
+fi
+
+./bin/otp --add-contact distinctkeys kc_dupkey.txt kc_otherkey.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - two genuinely different keys are still accepted"
+else
+  echo "     ! FAIL - a legitimate key pair was rejected"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+#  re-using a contact name must warn about already-spent key material
+#
+#  Once a contact is removed its key files are gone, so nothing remains to
+#  compare a freshly supplied key against. Supplying the ORIGINAL key from
+#  generation would restart at offset 0 over already-spent bytes.
+# -----------------------------------------------------------------------------
+
+echo "     Testing the warning when a contact name is re-used..."
+
+printf 'consume a little' | ./bin/otp -c distinctkeys --encrypt > /dev/null 2>&1
+./bin/otp --remove-contact distinctkeys > /dev/null 2>&1
+
+./bin/otp --add-contact distinctkeys kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_reuse.log
+RC=$?
+grep -q "has been used on this keychain before" kc_reuse.log
+G=$?
+if [ $RC -eq 0 ] && [ $G -eq 0 ]; then
+  echo "     - PASS - re-adding a previously used name warns but still succeeds"
+else
+  echo "     ! FAIL - name re-use not warned about (exit $RC, warn $G)"
+  cat kc_reuse.log
+  exit 1
+fi
+
+grep -q "ORIGINAL copies" kc_reuse.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the warning names the actual hazard"
+else
+  echo "     ! FAIL - the warning does not explain the hazard"
+  exit 1
+fi
+
+# A name never used before must stay silent
+./bin/otp --add-contact neverseen kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_quiet.log
+if [ ! -s kc_quiet.log ]; then
+  echo "     - PASS - a fresh contact name produces no warning"
+else
+  echo "     ! FAIL - a fresh name produced output"
+  cat kc_quiet.log
+  exit 1
+fi
+
+./bin/otp --remove-contact distinctkeys > /dev/null 2>&1
+./bin/otp --remove-contact neverseen > /dev/null 2>&1
+rm -f kc_dupkey.txt kc_dupcopy.txt kc_otherkey.txt kc_dup1.log kc_dup2.log kc_reuse.log kc_quiet.log
+
+# -----------------------------------------------------------------------------
 #  cleanup
 # -----------------------------------------------------------------------------
 
 echo "     Cleaning up test files..."
 
-rm -f keychain.txt alice_keychain.txt bob_keychain.txt
 rm -rf .keychain
 rm -f encryption_testalice.txt decryption_testalice.txt
 rm -f encryption_testbob.txt decryption_testbob.txt

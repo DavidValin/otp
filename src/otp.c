@@ -94,7 +94,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
   {
-    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, ending with \".next\".\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n\n");
+    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n\n");
     return 0;
   }
 
@@ -102,12 +102,9 @@ int main(int argc, char *argv[])
    *  Handles keychain commands                                               *
    * *********************************************************************** */
 
-  // Load keychain for all keychain operations
-  const char *keychain_file = "keychain.txt";
-
   if (argc >= 3 && (strcmp(argv[1], "-ac") == 0 || strcmp(argv[1], "--add-contact") == 0))
   {
-    load_keychain(keychain_file);
+    load_keychain();
     int result;
 
     // Check if key files are provided
@@ -115,6 +112,17 @@ int main(int argc, char *argv[])
     {
       // Add contact with keys: otp -ac <name> <enc_key_file> <dec_key_file>
       result = add_contact_with_keys(argv[2], argv[3], argv[4]);
+    }
+    else if (argc == 4)
+    {
+      /* One key file is never enough: a contact needs both an encryption
+       * and a decryption key. Silently ignoring the argument here would
+       * create a keyless contact and report success, leaving the user
+       * believing their key was loaded. */
+      fprintf(stderr, "Error: Both an encryption and a decryption key file are required\n");
+      fprintf(stderr, "Usage: otp --add-contact <name> [<enc_key_file> <dec_key_file>]\n");
+      cleanup_keychain();
+      return 1;
     }
     else
     {
@@ -127,24 +135,24 @@ int main(int argc, char *argv[])
     }
 
     cleanup_keychain();
-    return result;
+    return result == 0 ? 0 : 1;
   }
 
   if (argc >= 3 && (strcmp(argv[1], "-rc") == 0 || strcmp(argv[1], "--remove-contact") == 0))
   {
-    load_keychain(keychain_file);
+    load_keychain();
     int result = remove_contact(argv[2]);
     cleanup_keychain();
     if (result == 0)
     {
       printf("Contact '%s' removed successfully\n", argv[2]);
     }
-    return result;
+    return result == 0 ? 0 : 1;
   }
 
   if (argc >= 3 && (strcmp(argv[1], "-hc") == 0 || strcmp(argv[1], "--has-contact") == 0))
   {
-    load_keychain(keychain_file);
+    load_keychain();
     int exists = has_contact(argv[2]);
     cleanup_keychain();
     if (exists)
@@ -161,7 +169,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-lc") == 0 || strcmp(argv[1], "--list-contacts") == 0))
   {
-    load_keychain(keychain_file);
+    load_keychain();
     list_contacts();
     cleanup_keychain();
     return 0;
@@ -169,7 +177,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 3 && (strcmp(argv[1], "-sc") == 0 || strcmp(argv[1], "--show-contact") == 0))
   {
-    load_keychain(keychain_file);
+    load_keychain();
     show_contact(argv[2]);
     cleanup_keychain();
     return 0;
@@ -220,7 +228,7 @@ int main(int argc, char *argv[])
       return 1;
     }
 
-    load_keychain(keychain_file);
+    load_keychain();
 
     int result;
     if (is_encrypt)
@@ -233,7 +241,15 @@ int main(int argc, char *argv[])
     }
 
     cleanup_keychain();
-    return result;
+
+    /* Map to a stable exit status. KEYCHAIN_REDELIVERED gets its own,
+     * non-zero code: the command produced valid output, but that output
+     * is a recovered message from an interrupted earlier run and this
+     * invocation's input was NOT processed. A script must be able to tell
+     * that apart from success without parsing stderr. */
+    if (result == KEYCHAIN_REDELIVERED)
+      return KEYCHAIN_REDELIVERED;
+    return result == KEYCHAIN_OK ? 0 : 1;
   }
 
   /* **************************************************************************
@@ -434,7 +450,7 @@ int main(int argc, char *argv[])
   int out_fd = open(outfileunused, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
   if (out_fd < 0)
   {
-    fprintf(stderr, "Error creating output file %s: %s\\n", outfileunused, strerror(errno));
+    fprintf(stderr, "Error creating output file %s: %s\n", outfileunused, strerror(errno));
     return 1;
   }
   FILE *unused = fdopen(out_fd, "wb");
@@ -442,13 +458,13 @@ int main(int argc, char *argv[])
   int key_fd = open(argv[optind], O_RDONLY | O_BINARY);
   if (key_fd < 0)
   {
-    fprintf(stderr, "Error opening key file %s: %s\\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error opening key file %s: %s\n", argv[optind], strerror(errno));
     close(out_fd);
     return 1;
   }
   if (flock(key_fd, LOCK_EX) < 0)
   {
-    fprintf(stderr, "Error locking key file %s: %s\\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error locking key file %s: %s\n", argv[optind], strerror(errno));
     close(key_fd);
     close(out_fd);
     return 1;
@@ -458,14 +474,14 @@ int main(int argc, char *argv[])
   struct stat ks;
   if (fstat(key_fd, &ks) < 0)
   {
-    fprintf(stderr, "Error statting key file %s: %s\\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error statting key file %s: %s\n", argv[optind], strerror(errno));
     fclose(infile);
     fclose(unused);
     return 1;
   }
   if (!S_ISREG(ks.st_mode))
   {
-    fprintf(stderr, "%s is not a regular file\\n", argv[optind]);
+    fprintf(stderr, "%s is not a regular file\n", argv[optind]);
     fclose(infile);
     fclose(unused);
     return 1;
@@ -473,7 +489,7 @@ int main(int argc, char *argv[])
   size_t key_size = ks.st_size;
   if (key_size == 0)
   {
-    fprintf(stderr, "Key file %s is empty\\n", argv[optind]);
+    fprintf(stderr, "Key file %s is empty\n", argv[optind]);
     fclose(infile);
     fclose(unused);
     return 1;
@@ -482,14 +498,14 @@ int main(int argc, char *argv[])
   unsigned char *keybuf = malloc(key_size);
   if (!keybuf)
   {
-    fprintf(stderr, "Memory allocation failed\\n");
+    fprintf(stderr, "Memory allocation failed\n");
     fclose(infile);
     fclose(unused);
     return 1;
   }
   if (fread(keybuf, 1, key_size, infile) != key_size)
   {
-    fprintf(stderr, "Error reading key file %s\\n", argv[optind]);
+    fprintf(stderr, "Error reading key file %s\n", argv[optind]);
     free(keybuf);
     fclose(infile);
     fclose(unused);
@@ -501,7 +517,7 @@ int main(int argc, char *argv[])
   int first = fgetc(stdin);
   if (first == EOF)
   {
-    fprintf(stderr, "No input provided; producing empty output.\\n");
+    fprintf(stderr, "No input provided; producing empty output.\n");
     /* Write empty .next file and exit */
     fclose(infile);
     free(keybuf);
@@ -518,7 +534,7 @@ int main(int argc, char *argv[])
   {
     if (used >= key_size)
     {
-      fprintf(stderr, "Error: key file %s shorter than input.\\n", argv[optind]);
+      fprintf(stderr, "Error: key file %s shorter than input.\n", argv[optind]);
       free(keybuf);
       fclose(infile);
       fclose(unused);
@@ -528,7 +544,7 @@ int main(int argc, char *argv[])
     outbyte ^= keybuf[used];
     if (fwrite(&outbyte, 1, 1, stdout) != 1)
     {
-      fprintf(stderr, "Error writing to stdout: %s\\n", strerror(errno));
+      fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
       free(keybuf);
       fclose(infile);
       fclose(unused);
@@ -541,7 +557,7 @@ int main(int argc, char *argv[])
   {
     if (fwrite(keybuf + used, 1, key_size - used, unused) != key_size - used)
     {
-      fprintf(stderr, "Error writing remainder to %s: %s\\n", outfileunused, strerror(errno));
+      fprintf(stderr, "Error writing remainder to %s: %s\n", outfileunused, strerror(errno));
       free(keybuf);
       fclose(infile);
       fclose(unused);

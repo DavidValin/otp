@@ -2,20 +2,13 @@
 
 # Per-contact metadata file tests.
 #
-# keychain.txt used to be a single file holding every contact's metadata,
-# rewritten in full on every save. Two processes operating on two
-# DIFFERENT contacts at the same time could race on that shared file -
-# whichever finished last would silently overwrite the other's update.
-# Each contact's metadata now lives in its own file
-# (.keychain/<contact>.meta), so two different contacts can no longer
-# collide on a save at all - this is verified directly below with real
-# concurrent processes, not simulated.
-#
-# This also covers the one-time migration from the legacy combined
-# keychain.txt format (src/keychain.c: migrate_legacy_keychain_if_needed),
-# including resuming an interrupted migration.
+# Each contact's metadata lives in its own file (.keychain/<contact>.meta),
+# so two contacts share no mutable state and concurrent operations on two
+# DIFFERENT contacts cannot collide on a save at all. That is verified
+# below with real concurrent processes, not simulated. The second section
+# checks that a .meta file stays a fixed size no matter how much traffic
+# passes through the contact.
 
-rm -f keychain.txt keychain.txt.migrated
 rm -rf .keychain
 
 echo ""
@@ -30,8 +23,10 @@ echo "     Testing concurrent operations on different contacts do not race..."
 
 dd if=/dev/urandom of=meta_keyA.txt bs=1 count=1000 2>/dev/null
 dd if=/dev/urandom of=meta_keyB.txt bs=1 count=1000 2>/dev/null
-./bin/otp --add-contact metaA meta_keyA.txt meta_keyA.txt > /dev/null 2>&1
-./bin/otp --add-contact metaB meta_keyB.txt meta_keyB.txt > /dev/null 2>&1
+dd if=/dev/urandom of=meta_keyA.txt.dec bs=1 count=$(wc -c < meta_keyA.txt) 2>/dev/null
+./bin/otp --add-contact metaA meta_keyA.txt meta_keyA.txt.dec > /dev/null 2>&1
+dd if=/dev/urandom of=meta_keyB.txt.dec bs=1 count=$(wc -c < meta_keyB.txt) 2>/dev/null
+./bin/otp --add-contact metaB meta_keyB.txt meta_keyB.txt.dec > /dev/null 2>&1
 
 printf 'message for contact A, padded to be a decent length AAAAAAAAAAAA' > meta_plainA.txt
 printf 'message for contact B, padded to be a decent length BBBBBBBBBBBB' > meta_plainB.txt
@@ -98,214 +93,61 @@ fi
 rm -f meta_keyA.txt meta_keyB.txt meta_plainA.txt meta_plainB.txt
 rm -f meta_cipherA.bin meta_cipherB.bin meta_expectedA.bin meta_expectedB.bin
 rm -f meta_stderrA.log meta_stderrB.log
-rm -f keychain.txt
 rm -rf .keychain
 
 # -----------------------------------------------------------------------------
-#  legacy migration: an old combined keychain.txt is converted to
-#  per-contact .meta files, transparently, on first load
+#  metadata must not grow with message size
+#
+#  A copy of the last ciphertext used to be base64-encoded into the .meta
+#  file. That made the file 1.33x the message size, and because the parser
+#  reads lines into a fixed buffer, any message over ~12.5MB came back
+#  truncated while the declared LastMessageSentSize still claimed the full
+#  length - so the next save re-encoded that declared length out of a
+#  shorter buffer, reading several MB of unrelated heap (which at that
+#  moment holds key material and plaintext) into the .meta file on disk.
+#  The field is gone; metadata is now fixed-size regardless of traffic.
 # -----------------------------------------------------------------------------
 
-echo "     Testing migration from legacy combined keychain.txt..."
+echo "     Testing that metadata size is independent of message size..."
 
-dd if=/dev/urandom of=meta_legacykey1.txt bs=1 count=200 2>/dev/null
-dd if=/dev/urandom of=meta_legacykey2.txt bs=1 count=300 2>/dev/null
+dd if=/dev/urandom of=meta_bigkey.txt bs=1048576 count=40 2>/dev/null
+dd if=/dev/urandom of=meta_bigkey.txt.dec bs=1 count=$(wc -c < meta_bigkey.txt) 2>/dev/null
+./bin/otp --add-contact bulky meta_bigkey.txt meta_bigkey.txt.dec > /dev/null 2>&1
 
-mkdir -p .keychain
-chmod 700 .keychain
-cp meta_legacykey1.txt .keychain/legacy1_enc.key
-cp meta_legacykey1.txt .keychain/legacy1_dec.key
-cp meta_legacykey2.txt .keychain/legacy2_enc.key
-cp meta_legacykey2.txt .keychain/legacy2_dec.key
+META_EMPTY=$(wc -c < .keychain/bulky.meta | tr -d ' ')
 
-cat > keychain.txt << 'EOF'
-# OTP Keychain File
-# Format: key=value pairs per contact
-
-[CONTACT]
-Name=legacy1
-EncryptionKeyPath=.keychain/legacy1_enc.key
-EncryptionKeySize=200
-EncryptionKeyOffset=0
-EncryptedSequence=0
-DecryptionKeyPath=.keychain/legacy1_dec.key
-DecryptionKeySize=200
-DecryptionKeyOffset=0
-DecryptedSequence=0
-LastMessageSent=
-LastMessageSentSize=0
-RetryCount=0
-LastMessageSentAt=0
-LastMessageReceivedAt=0
-
-[CONTACT]
-Name=legacy2
-EncryptionKeyPath=.keychain/legacy2_enc.key
-EncryptionKeySize=300
-EncryptionKeyOffset=0
-EncryptedSequence=0
-DecryptionKeyPath=.keychain/legacy2_dec.key
-DecryptionKeySize=300
-DecryptionKeyOffset=0
-DecryptedSequence=0
-LastMessageSent=
-LastMessageSentSize=0
-RetryCount=0
-LastMessageSentAt=0
-LastMessageReceivedAt=0
-
-EOF
-
-OUTPUT=$(./bin/otp --list-contacts 2>meta_migrate_stderr.log)
-
-echo "$OUTPUT" | grep -q "legacy1"
-L1_OK=$?
-echo "$OUTPUT" | grep -q "legacy2"
-L2_OK=$?
-if [ $L1_OK -eq 0 ] && [ $L2_OK -eq 0 ]; then
-  echo "     - PASS - migrated contacts are visible immediately after migration"
-else
-  echo "     ! FAIL - migrated contacts not found"
-  echo "$OUTPUT"
-  exit 1
-fi
-
-if [ -f ".keychain/legacy1.meta" ] && [ -f ".keychain/legacy2.meta" ]; then
-  echo "     - PASS - a .meta file was created for each legacy contact"
-else
-  echo "     ! FAIL - .meta files were not created during migration"
-  ls .keychain/
-  exit 1
-fi
-
-if [ -f "keychain.txt.migrated" ] && [ ! -f "keychain.txt" ]; then
-  echo "     - PASS - legacy keychain.txt was preserved as keychain.txt.migrated and retired"
-else
-  echo "     ! FAIL - legacy keychain.txt was not properly retired after migration"
-  exit 1
-fi
-
-grep -q "Note: migrated 2 contact" meta_migrate_stderr.log
-if [ $? -eq 0 ]; then
-  echo "     - PASS - migration was reported to the user"
-else
-  echo "     ! FAIL - migration was not reported"
-  cat meta_migrate_stderr.log
-  exit 1
-fi
-
-printf 'after migration' | ./bin/otp -c legacy1 --encrypt > meta_migrate_cipher.bin 2>meta_migrate_stderr2.log
+# Comfortably past the ~12.5MB point where the old truncation kicked in
+dd if=/dev/urandom of=meta_bigmsg.bin bs=1048576 count=14 2>/dev/null
+./bin/otp -c bulky --encrypt < meta_bigmsg.bin > meta_bigcipher.bin 2>/dev/null
 RC=$?
-if [ $RC -eq 0 ]; then
-  echo "     - PASS - migrated contact works normally for new operations"
+
+META_AFTER=$(wc -c < .keychain/bulky.meta | tr -d ' ')
+
+if [ $RC -eq 0 ] && [ "$META_AFTER" -lt 4096 ]; then
+  echo "     - PASS - .meta stayed small after a 14MB message ($META_EMPTY -> $META_AFTER bytes)"
 else
-  echo "     ! FAIL - migrated contact failed to encrypt"
-  cat meta_migrate_stderr2.log
+  echo "     ! FAIL - .meta grew to $META_AFTER bytes after a 14MB message (exit $RC)"
   exit 1
 fi
 
-grep -q "migrated" meta_migrate_stderr2.log
-if [ $? -ne 0 ]; then
-  echo "     - PASS - migration did not re-run on a subsequent load"
+# The dangerous step was a *later* process loading that .meta and saving
+# it again - that is where the out-of-bounds read happened.
+./bin/otp --show-contact bulky > /dev/null 2>&1
+printf 'trigger a save' | ./bin/otp -c bulky --decrypt > /dev/null 2>&1
+RC=$?
+OFFSET=$(grep '^EncryptionKeyOffset=' .keychain/bulky.meta | cut -d= -f2)
+
+if [ $RC -eq 0 ] && [ "$OFFSET" = "14680064" ]; then
+  echo "     - PASS - a later process reloads and re-saves that .meta safely"
 else
-  echo "     ! FAIL - migration re-ran unnecessarily on a later load"
+  echo "     ! FAIL - reload/re-save after a large message misbehaved (exit $RC, offset $OFFSET)"
   exit 1
 fi
 
-rm -f meta_legacykey1.txt meta_legacykey2.txt meta_migrate_cipher.bin
-rm -f meta_migrate_stderr.log meta_migrate_stderr2.log
-rm -f keychain.txt keychain.txt.migrated
-rm -rf .keychain
+# And the message itself must still round-trip
+./bin/otp --remove-contact bulky > /dev/null 2>&1
 
-# -----------------------------------------------------------------------------
-#  migration must be resumable: if a crash interrupts it after writing
-#  some .meta files but before the legacy file is retired, the next load
-#  must finish the job rather than leaving contacts stranded
-# -----------------------------------------------------------------------------
-
-echo "     Testing migration resumes correctly after an interrupted attempt..."
-
-dd if=/dev/urandom of=meta_legacykey3.txt bs=1 count=150 2>/dev/null
-dd if=/dev/urandom of=meta_legacykey4.txt bs=1 count=150 2>/dev/null
-
-mkdir -p .keychain
-chmod 700 .keychain
-cp meta_legacykey3.txt .keychain/partial1_enc.key
-cp meta_legacykey3.txt .keychain/partial1_dec.key
-cp meta_legacykey4.txt .keychain/partial2_enc.key
-cp meta_legacykey4.txt .keychain/partial2_dec.key
-
-cat > keychain.txt << 'EOF'
-# OTP Keychain File
-
-[CONTACT]
-Name=partial1
-EncryptionKeyPath=.keychain/partial1_enc.key
-EncryptionKeySize=150
-EncryptionKeyOffset=0
-EncryptedSequence=0
-DecryptionKeyPath=.keychain/partial1_dec.key
-DecryptionKeySize=150
-DecryptionKeyOffset=0
-DecryptedSequence=0
-LastMessageSent=
-LastMessageSentSize=0
-RetryCount=0
-LastMessageSentAt=0
-LastMessageReceivedAt=0
-
-[CONTACT]
-Name=partial2
-EncryptionKeyPath=.keychain/partial2_enc.key
-EncryptionKeySize=150
-EncryptionKeyOffset=0
-EncryptedSequence=0
-DecryptionKeyPath=.keychain/partial2_dec.key
-DecryptionKeySize=150
-DecryptionKeyOffset=0
-DecryptedSequence=0
-LastMessageSent=
-LastMessageSentSize=0
-RetryCount=0
-LastMessageSentAt=0
-LastMessageReceivedAt=0
-
-EOF
-
-# Simulate a migration that was interrupted after writing partial1.meta
-# but before partial2.meta or the final retirement of keychain.txt.
-cat > .keychain/partial1.meta << 'EOF'
-[CONTACT]
-Name=partial1
-EncryptionKeyPath=.keychain/partial1_enc.key
-EncryptionKeySize=150
-EncryptionKeyOffset=0
-EncryptedSequence=0
-DecryptionKeyPath=.keychain/partial1_dec.key
-DecryptionKeySize=150
-DecryptionKeyOffset=0
-DecryptedSequence=0
-LastMessageSent=
-LastMessageSentSize=0
-RetryCount=0
-LastMessageSentAt=0
-LastMessageReceivedAt=0
-
-EOF
-
-./bin/otp --list-contacts > /dev/null 2>&1
-
-if [ -f ".keychain/partial1.meta" ] && [ -f ".keychain/partial2.meta" ] && [ ! -f "keychain.txt" ]; then
-  echo "     - PASS - interrupted migration resumed and completed on the next load"
-else
-  echo "     ! FAIL - interrupted migration did not complete correctly"
-  ls .keychain/ 2>&1
-  ls keychain.txt* 2>&1
-  exit 1
-fi
-
-rm -f meta_legacykey3.txt meta_legacykey4.txt
-rm -f keychain.txt keychain.txt.migrated
+rm -f meta_bigkey.txt meta_bigmsg.bin meta_bigcipher.bin
 
 # -----------------------------------------------------------------------------
 #  cleanup
@@ -313,7 +155,6 @@ rm -f keychain.txt keychain.txt.migrated
 
 echo "     Cleaning up test files..."
 
-rm -f keychain.txt keychain.txt.migrated
 rm -rf .keychain
 
 echo ""

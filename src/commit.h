@@ -62,9 +62,9 @@ void commit_discard_path(const char *path);
 /* ---- Pending output artifacts -------------------------------------------
  * A "pending artifact" is the fully-verified ciphertext/plaintext of one
  * message, staged and published under a name tagged with the exact key
- * range it corresponds to, *before* the key file and keychain.txt are
- * committed to reflect that range as consumed. Because delivery to the
- * real output stream is the one step this tool cannot make atomic (it
+ * range it corresponds to, *before* the key file and the contact's .meta
+ * file are committed to reflect that range as consumed. Because delivery
+ * to the real output stream is the one step this tool cannot make atomic (it
  * doesn't control what's on the other end of stdout), key consumption is
  * anchored to this durable local copy instead - once it exists and is
  * verified, delivery becomes a separate, freely-retryable, idempotent
@@ -79,7 +79,7 @@ typedef enum
 {
   COMMIT_RECOVER_NONE = 0,   /* no leftover pending artifact */
   COMMIT_RECOVER_DISCARD,    /* commit never started - discarded, nothing lost */
-  COMMIT_RECOVER_FINISH,     /* key file committed, keychain.txt was stale - finish it */
+  COMMIT_RECOVER_FINISH,     /* key file committed, .meta was stale - finish it */
   COMMIT_RECOVER_DELIVER,    /* fully committed already - just redeliver */
   COMMIT_RECOVER_ERROR       /* state didn't match any known-safe window - discarded defensively */
 } CommitRecoverAction;
@@ -102,14 +102,23 @@ typedef struct
  * Contact struct). See README.md for the truth table this implements.
  * Returns 0 on a decisive outcome (including NONE), -1 only for a hard
  * I/O error while reconciling (out->action is also set to ERROR).
+ *
+ * Also sweeps away any abandoned *staging* file for this contact and
+ * direction - a partial write from a process that died before its output
+ * was ever verified or published. Those carry no recoverable state, but
+ * on the decrypt side they hold recovered plaintext, so they must not be
+ * left behind. Deleting them here is safe precisely because callers hold
+ * the contact lock, so no live process can be mid-staging.
  */
 int commit_reconcile(const char *keychain_dir, const char *contact,
                       const char *direction, const char *key_file_path,
                       size_t declared_offset, size_t declared_size,
                       size_t declared_sequence, CommitRecovery *out);
 
-/* Removes any leftover pending artifacts for `contact` (both directions) -
- * used when a contact is removed, so orphaned staged files don't linger. */
+/* Removes every leftover pending artifact AND every abandoned staging
+ * file for `contact`, in both directions - used when a contact is removed,
+ * so nothing of that contact's message content lingers in the keychain
+ * directory after it is gone. */
 void commit_discard_all_pending(const char *keychain_dir, const char *contact);
 
 /* ---- Per-contact mutual exclusion --------------------------------------
@@ -148,5 +157,14 @@ void contact_lock_release(ContactLock *lock);
  * landed where intended. A no-op whenever the variable isn't set, so it
  * has zero effect on normal operation. */
 void commit_test_crash_point(const char *point);
+
+/* Test-only fault injection: if OTP_TEST_CORRUPT_POINT is set and equals
+ * `point`, silently corrupts the file at `path` (flipping its first byte,
+ * or appending one if it is empty). Placed between a staged write and its
+ * read-back verification, this simulates the case the verification exists
+ * for - bytes that libc accepted but that are not correctly on disk - so
+ * tests can prove the check actually fires rather than merely assuming it
+ * would. A no-op whenever the variable isn't set. */
+void commit_test_corrupt_file(const char *point, const char *path);
 
 #endif /* COMMIT_H */

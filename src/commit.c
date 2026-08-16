@@ -24,14 +24,19 @@
 #define O_BINARY_FLAG _O_BINARY
 #define fsync _commit
 #define unlink _unlink
-#define rename_file rename
 #ifndef _MSC_VER
+/* Map the POSIX spellings this file uses onto the CRT's underscore names.
+ * MSVC also exposes the POSIX names by default, but only as deprecated
+ * aliases, so spell the mapping out rather than depending on that - the
+ * same mapping keychain.c already makes. */
 #define fileno _fileno
+#define open _open
+#define close _close
+#define fdopen _fdopen
 #endif
 #else
 #include <unistd.h>
 #define O_BINARY_FLAG 0
-#define rename_file rename
 #endif
 
 #define READBACK_CHUNK 65536
@@ -75,6 +80,7 @@ static unsigned long crc32_final(unsigned long state)
 
 /* ---- small helpers ------------------------------------------------------ */
 
+#ifndef _WIN32
 static void split_dir(const char *path, char *dir, size_t dir_size)
 {
   const char *slash = strrchr(path, '/');
@@ -96,6 +102,7 @@ static void split_dir(const char *path, char *dir, size_t dir_size)
     snprintf(dir, dir_size, ".");
   }
 }
+#endif /* !_WIN32 - only fsync_parent_dir's POSIX body uses this */
 
 /* Best-effort: fsync the directory containing `path` so a completed
  * rename() survives a power loss, not just a process kill. Windows has no
@@ -151,6 +158,8 @@ int commit_write_verified(const char *tmp_path, const unsigned char *data, size_
     return -1;
   }
   fclose(f);
+
+  commit_test_corrupt_file("verified_write", tmp_path);
 
   /* Read back and verify byte-for-byte against what we intended to write -
    * a successful fwrite() only proves libc accepted the bytes, not that
@@ -239,6 +248,8 @@ int commit_stage_close_verified(CommitStage *stage)
   fclose(stage->f);
   stage->f = NULL;
 
+  commit_test_corrupt_file("staged_output", stage->tmp_path);
+
   FILE *rf = fopen(stage->tmp_path, "rb");
   if (!rf)
   {
@@ -280,7 +291,10 @@ void commit_stage_abort(CommitStage *stage)
 
 int commit_publish(const char *tmp_path, const char *final_path)
 {
-  if (rename_file(tmp_path, final_path) != 0)
+  /* otp_rename_replace(), not rename(): every publish here lands on a path
+   * that already exists, and the Windows CRT rename() refuses that. See
+   * platform.h. */
+  if (otp_rename_replace(tmp_path, final_path) != 0)
   {
     fprintf(stderr, "Error: failed to publish %s -> %s: %s\n", tmp_path, final_path, strerror(errno));
     return -1;
@@ -314,6 +328,32 @@ static int parse_pending_name(const char *name, const char *prefix,
   return sscanf(name + prefix_len, "%zu_off%zu_len%zu.bin", seq, off, len) == 3;
 }
 
+static int has_suffix(const char *name, const char *suffix)
+{
+  size_t n = strlen(name), s = strlen(suffix);
+  return n >= s && strcmp(name + n - s, suffix) == 0;
+}
+
+/* Build the two name fragments that identify everything one direction of
+ * one contact can leave behind in the keychain directory:
+ *   <contact>_<dir>_pending_seq<N>_off<O>_len<L>.bin - a published,
+ *     fully-verified artifact; the input to the recovery truth table.
+ *   <contact>_<dir>_pending.<pid>.tmp - a *staging* file, still being
+ *     written when its process died. It was never verified and never
+ *     published, so it carries no recoverable meaning - but it does hold
+ *     real message content (on the decrypt side, recovered plaintext),
+ *     so it must not be left lying around. Callers sweep these while
+ *     holding the contact lock, which is what makes deleting them safe:
+ *     no other process can be mid-staging for this contact+direction.
+ */
+static void build_pending_prefixes(const char *contact, const char *direction,
+                                    char *artifact_prefix, size_t artifact_size,
+                                    char *stage_prefix, size_t stage_size)
+{
+  snprintf(artifact_prefix, artifact_size, "%s_%s_pending_seq", contact, direction);
+  snprintf(stage_prefix, stage_size, "%s_%s_pending.", contact, direction);
+}
+
 int commit_reconcile(const char *keychain_dir, const char *contact,
                       const char *direction, const char *key_file_path,
                       size_t declared_offset, size_t declared_size,
@@ -327,8 +367,9 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   if (!d)
     return 0; /* no keychain dir yet - nothing to reconcile */
 
-  char prefix[300];
-  snprintf(prefix, sizeof(prefix), "%s_%s_pending_seq", contact, direction);
+  char prefix[300], stage_prefix[300];
+  build_pending_prefixes(contact, direction, prefix, sizeof(prefix),
+                         stage_prefix, sizeof(stage_prefix));
 
   struct dirent *entry;
   char found_path[600] = {0};
@@ -338,6 +379,19 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   while ((entry = readdir(d)) != NULL)
   {
     size_t seq, off, len;
+
+    /* Sweep abandoned staging files first. These are never recoverable -
+     * an unfinished, unverified write - but they can be large and, when
+     * left by an interrupted decrypt, they contain plaintext. */
+    if (strncmp(entry->d_name, stage_prefix, strlen(stage_prefix)) == 0 &&
+        has_suffix(entry->d_name, ".tmp"))
+    {
+      char stale_path[600];
+      snprintf(stale_path, sizeof(stale_path), "%s/%s", keychain_dir, entry->d_name);
+      unlink(stale_path);
+      continue;
+    }
+
     if (!parse_pending_name(entry->d_name, prefix, &seq, &off, &len))
       continue;
 
@@ -364,8 +418,8 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   if (!found)
     return 0;
 
-  struct stat st;
-  if (stat(key_file_path, &st) != 0)
+  unsigned long long key_size_64;
+  if (otp_file_size(key_file_path, &key_size_64) != 0)
   {
     fprintf(stderr, "Warning: cannot stat key file %s while reconciling %s: %s\n",
             key_file_path, found_path, strerror(errno));
@@ -373,7 +427,7 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
     out->action = COMMIT_RECOVER_ERROR;
     return -1;
   }
-  size_t actual_key_size = (size_t)st.st_size;
+  size_t actual_key_size = (size_t)key_size_64;
 
   out->sequence = found_seq;
   out->range_offset = found_offset;
@@ -382,7 +436,7 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
 
   if (actual_key_size == declared_size && declared_offset == found_offset)
   {
-    /* Window 1: neither the key file nor keychain.txt reflect this
+    /* Window 1: neither the key file nor the .meta file reflect this
      * operation - it never committed. Nothing was ever spent or
      * delivered, so the leftover artifact is simply stale. */
     unlink(found_path);
@@ -393,7 +447,7 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   if (actual_key_size + found_len == declared_size && declared_offset == found_offset)
   {
     /* Window 2: the key file was already truncated for this operation,
-     * but keychain.txt hasn't caught up. Finish the commit using the
+     * but the .meta file hasn't caught up. Finish the commit using the
      * values recorded in the artifact's own filename - no guessing. */
     out->action = COMMIT_RECOVER_FINISH;
     out->corrected_offset = found_offset + found_len;
@@ -423,15 +477,20 @@ void commit_discard_all_pending(const char *keychain_dir, const char *contact)
   if (!d)
     return;
 
-  char prefix[300];
-  snprintf(prefix, sizeof(prefix), "%s_enc_pending_seq", contact);
-  char prefix_dec[300];
-  snprintf(prefix_dec, sizeof(prefix_dec), "%s_dec_pending_seq", contact);
+  /* Match on the shared "<contact>_<dir>_pending" stem so this covers
+   * both published artifacts and abandoned staging files
+   * (<contact>_<dir>_pending.<pid>.tmp). This is the only thing that ever
+   * revisits a dead process's pid-tagged name, so anything it misses
+   * stays on disk forever - and on the decrypt side that file holds
+   * recovered plaintext. */
+  char prefix_enc[300], prefix_dec[300];
+  snprintf(prefix_enc, sizeof(prefix_enc), "%s_enc_pending", contact);
+  snprintf(prefix_dec, sizeof(prefix_dec), "%s_dec_pending", contact);
 
   struct dirent *entry;
   while ((entry = readdir(d)) != NULL)
   {
-    if (strncmp(entry->d_name, prefix, strlen(prefix)) == 0 ||
+    if (strncmp(entry->d_name, prefix_enc, strlen(prefix_enc)) == 0 ||
         strncmp(entry->d_name, prefix_dec, strlen(prefix_dec)) == 0)
     {
       char full_path[600];
@@ -482,6 +541,33 @@ void contact_lock_release(ContactLock *lock)
 }
 
 /* ---- test-only fault injection ------------------------------------------ */
+
+void commit_test_corrupt_file(const char *point, const char *path)
+{
+  const char *target = getenv("OTP_TEST_CORRUPT_POINT");
+  if (!target || strcmp(target, point) != 0)
+    return;
+
+  FILE *f = fopen(path, "r+b");
+  if (!f)
+    return;
+  int first = fgetc(f);
+  if (first == EOF)
+  {
+    /* Empty payload: make it non-empty so the length check catches it. */
+    fclose(f);
+    f = fopen(path, "ab");
+    if (f)
+    {
+      fputc('X', f);
+      fclose(f);
+    }
+    return;
+  }
+  if (fseek(f, 0, SEEK_SET) == 0)
+    fputc(first ^ 0xFF, f);
+  fclose(f);
+}
 
 void commit_test_crash_point(const char *point)
 {

@@ -13,6 +13,23 @@
  *   any call site. On POSIX this header changes nothing: it just includes   *
  *   the real <dirent.h> and <sys/file.h>.                                   *
  *                                                                           *
+ *   It also provides three otp_-prefixed helpers whose POSIX form needs no  *
+ *   adjustment but whose Windows form genuinely differs:                    *
+ *                                                                           *
+ *     otp_rename_replace() - atomic rename over an existing destination.    *
+ *       This is the most important one: POSIX rename() silently replaces    *
+ *       an existing target, but the Windows CRT rename() *fails* with       *
+ *       EEXIST instead. Every commit_publish() in commit.c lands on a path  *
+ *       that already exists (a contact's .meta file, a contact's key        *
+ *       file), so plain rename() would make every publish after the very    *
+ *       first one fail on Windows - i.e. all keychain encrypt/decrypt would *
+ *       fail there. MoveFileExA(MOVEFILE_REPLACE_EXISTING) is the Win32     *
+ *       call carrying POSIX rename()'s replace-atomically semantics.        *
+ *     otp_file_size() / otp_fseek() - 64-bit file sizes and offsets. The    *
+ *       Windows CRT's struct stat and fseek() are 32-bit even in 64-bit     *
+ *       builds, which would silently break the >2GB keys this tool exists   *
+ *       to stream.                                                          *
+ *                                                                           *
  *   flock(fd, LOCK_EX) blocks until the lock is acquired (LockFileEx is     *
  *   called without LOCKFILE_FAIL_IMMEDIATELY, matching that default), and   *
  *   - like the POSIX flock() this mirrors - Windows releases every lock a   *
@@ -22,12 +39,14 @@
  *                                                                           *
  *   Verification note: no Windows/mingw toolchain was available while       *
  *   writing this, so it has not been built or run on actual Windows. The    *
- *   Windows branch below was compiled in isolation (gcc -D_WIN32) against   *
- *   stub headers whose declarations match the real Win32 API signatures     *
- *   (FindFirstFileA, LockFileEx, etc.), exercised the same way commit.c     *
- *   and keychain.c actually call it - which catches type/argument-order     *
- *   mistakes, but is not a substitute for a real Windows build and test     *
- *   run. Treat this implementation as reviewed, not field-tested.           *
+ *   Windows branch below, together with the Windows branches of commit.c    *
+ *   and keychain.c, was compiled in isolation (gcc -D_WIN32 -Wall -Wextra,  *
+ *   warning-free) against stub headers whose declarations match the real    *
+ *   Win32 and CRT signatures (FindFirstFileA, LockFileEx, MoveFileExA,      *
+ *   _stat64, _fseeki64, ...), exercised the same way commit.c and           *
+ *   keychain.c actually call them - which catches type and argument-order   *
+ *   mistakes and missing declarations, but is not a substitute for a real   *
+ *   Windows build and test run. Treat this as reviewed, not field-tested.   *
  *                                                                           *
  *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com          *
  *   License: Apache 2.0                                                     *
@@ -44,6 +63,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 /* ---- dirent-compatible directory scanning -------------------------------
  * Minimal opendir/readdir/closedir shim exposing just d_name, which is
@@ -68,11 +89,16 @@ typedef struct
   struct dirent entry;
 } DIR;
 
-static DIR *opendir(const char *path)
+static inline DIR *opendir(const char *path)
 {
+  /* Refuse rather than truncate. The callers pass buffers larger than
+   * MAX_PATH, and a silently shortened pattern would not fail - it would
+   * enumerate some *other*, shorter directory, which for the recovery
+   * scan means reconciling against the wrong set of pending artifacts. */
   char pattern[MAX_PATH];
-  snprintf(pattern, sizeof(pattern), "%s\\*", path);
-  pattern[sizeof(pattern) - 1] = '\0';
+  int n = snprintf(pattern, sizeof(pattern), "%s\\*", path);
+  if (n < 0 || (size_t)n >= sizeof(pattern))
+    return NULL;
 
   DIR *d = (DIR *)malloc(sizeof(DIR));
   if (!d)
@@ -88,7 +114,7 @@ static DIR *opendir(const char *path)
   return d;
 }
 
-static struct dirent *readdir(DIR *d)
+static inline struct dirent *readdir(DIR *d)
 {
   if (!d)
     return NULL;
@@ -105,7 +131,7 @@ static struct dirent *readdir(DIR *d)
   return &d->entry;
 }
 
-static int closedir(DIR *d)
+static inline int closedir(DIR *d)
 {
   if (!d)
     return -1;
@@ -129,7 +155,7 @@ static int closedir(DIR *d)
 #define LOCK_EX 2
 #define LOCK_UN 8
 
-static int flock(int fd, int operation)
+static inline int flock(int fd, int operation)
 {
   HANDLE h = (HANDLE)_get_osfhandle(fd);
   if (h == INVALID_HANDLE_VALUE)
@@ -144,10 +170,63 @@ static int flock(int fd, int operation)
   return LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK, 0, MAXDWORD, MAXDWORD, &ov) ? 0 : -1;
 }
 
+/* ---- atomic replace-rename, 64-bit sizes and offsets --------------------
+ * See the header comment: these are the calls whose Windows form is not
+ * merely a different spelling but a different behavior.
+ */
+static inline int otp_rename_replace(const char *from, const char *to)
+{
+  /* MOVEFILE_REPLACE_EXISTING gives the CRT rename() the one property it
+   * lacks on Windows and that the whole commit protocol depends on:
+   * replacing an already-existing destination in a single step, with no
+   * moment where the destination is missing. */
+  return MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 0 : -1;
+}
+
+static inline int otp_file_size(const char *path, unsigned long long *out)
+{
+  struct _stat64 st;
+  if (_stat64(path, &st) != 0)
+    return -1;
+  *out = (unsigned long long)st.st_size;
+  return 0;
+}
+
+static inline int otp_fseek(FILE *f, unsigned long long offset)
+{
+  return _fseeki64(f, (__int64)offset, SEEK_SET);
+}
+
 #else /* POSIX: real, unmodified system headers - no behavior change here */
 
 #include <dirent.h>
 #include <sys/file.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
+/* POSIX rename() already replaces an existing destination atomically, and
+ * off_t is 64-bit here because both translation units define
+ * _FILE_OFFSET_BITS=64 before any include (and the Makefile passes it
+ * too), so these are straight pass-throughs. */
+static inline int otp_rename_replace(const char *from, const char *to)
+{
+  return rename(from, to);
+}
+
+static inline int otp_file_size(const char *path, unsigned long long *out)
+{
+  struct stat st;
+  if (stat(path, &st) != 0)
+    return -1;
+  *out = (unsigned long long)st.st_size;
+  return 0;
+}
+
+static inline int otp_fseek(FILE *f, unsigned long long offset)
+{
+  return fseeko(f, (off_t)offset, SEEK_SET);
+}
 
 #endif /* _WIN32 */
 
