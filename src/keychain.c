@@ -182,11 +182,19 @@ typedef enum
   KEY_OVERLAP_NONE = 0,
   KEY_OVERLAP_IDENTICAL, // same size, same bytes
   KEY_OVERLAP_PREFIX,    // the shorter file is the head of the longer
-  KEY_OVERLAP_SUFFIX     // the shorter file is the tail of the longer
+  KEY_OVERLAP_SUFFIX,    // the shorter file is the tail of the longer
+  KEY_OVERLAP_UNKNOWN    // comparison could not be carried out at all
 } KeyOverlap;
 
 // Compare `length` bytes of two files, each starting at its own offset.
-// Returns 1 if every byte matches, 0 on any difference or I/O failure.
+// Returns 1 if every byte matches, 0 if any byte differs, and -1 if the
+// comparison could not be carried out (open/allocate/seek/read failure).
+// The -1 case must stay distinct from 0: a failure here proves nothing
+// about the ranges, and reporting it as "differ" would let two identical
+// pads slip through the overlap check. Nor can the copy step that
+// follows be trusted to hit the same problem - it uses a stack buffer
+// and opens its files sequentially, so neither an allocation failure nor
+// fd exhaustion here has to reproduce there.
 static int file_ranges_equal(const char *path_a, size_t offset_a,
                              const char *path_b, size_t offset_b,
                              size_t length)
@@ -199,25 +207,28 @@ static int file_ranges_equal(const char *path_a, size_t offset_a,
   unsigned char *buf_a = malloc(KEY_COMPARE_CHUNK);
   unsigned char *buf_b = malloc(KEY_COMPARE_CHUNK);
 
-  // A failure to read or allocate here cannot prove the ranges differ,
-  // and must not be reported as if it had: the copy step that follows
-  // will hit the same problem and report it properly.
-  int equal = (fa && fb && buf_a && buf_b);
+  int result = (fa && fb && buf_a && buf_b) ? 1 : -1;
+
+  // Test-only fault injection: simulates the acquisitions above failing,
+  // to prove the check fails closed instead of reading as "no overlap".
+  // A no-op whenever the variable isn't set.
+  if (getenv("OTP_TEST_FAIL_KEY_COMPARE"))
+    result = -1;
 
   // otp_fseek(), not fseek(): fseek() takes a long, which is 32-bit on
   // Windows even in 64-bit builds, so a tail comparison on a key over
   // 2GB would silently start in the wrong place.
-  if (equal && (otp_fseek(fa, offset_a) != 0 || otp_fseek(fb, offset_b) != 0))
-    equal = 0;
+  if (result == 1 && (otp_fseek(fa, offset_a) != 0 || otp_fseek(fb, offset_b) != 0))
+    result = -1;
 
   size_t left = length;
-  while (equal && left > 0)
+  while (result == 1 && left > 0)
   {
     size_t want = (left < KEY_COMPARE_CHUNK) ? left : KEY_COMPARE_CHUNK;
     if (fread(buf_a, 1, want, fa) != want || fread(buf_b, 1, want, fb) != want)
-      equal = 0;
+      result = -1; // stat said these bytes exist, so a short read is an I/O failure
     else if (memcmp(buf_a, buf_b, want) != 0)
-      equal = 0;
+      result = 0;
     else
       left -= want;
   }
@@ -228,7 +239,7 @@ static int file_ranges_equal(const char *path_a, size_t offset_a,
     fclose(fa);
   if (fb)
     fclose(fb);
-  return equal;
+  return result;
 }
 
 static KeyOverlap key_files_overlap(const char *path_a, const char *path_b,
@@ -240,7 +251,10 @@ static KeyOverlap key_files_overlap(const char *path_a, const char *path_b,
 
   // Fronts aligned. With equal sizes this is a whole-file comparison and
   // settles the identical case outright.
-  if (file_ranges_equal(path_a, 0, path_b, 0, shorter))
+  int front = file_ranges_equal(path_a, 0, path_b, 0, shorter);
+  if (front < 0)
+    return KEY_OVERLAP_UNKNOWN;
+  if (front)
     return (size_a == size_b) ? KEY_OVERLAP_IDENTICAL : KEY_OVERLAP_PREFIX;
 
   if (size_a == size_b)
@@ -248,7 +262,10 @@ static KeyOverlap key_files_overlap(const char *path_a, const char *path_b,
 
   // Tails aligned: the shorter file against the last `shorter` bytes of
   // the longer one. This is the ".next"/partially-consumed-key case.
-  if (file_ranges_equal(path_a, size_a - shorter, path_b, size_b - shorter, shorter))
+  int tail = file_ranges_equal(path_a, size_a - shorter, path_b, size_b - shorter, shorter);
+  if (tail < 0)
+    return KEY_OVERLAP_UNKNOWN;
+  if (tail)
     return KEY_OVERLAP_SUFFIX;
 
   return KEY_OVERLAP_NONE;
@@ -829,6 +846,20 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
 
   KeyOverlap overlap = key_files_overlap(encryption_key_file, decryption_key_file,
                                          enc_size, dec_size);
+  if (overlap == KEY_OVERLAP_UNKNOWN)
+  {
+    // Fail closed: accepting an identical pair here would silently break
+    // the pad forever, while refusing costs only a retry. This is the one
+    // moment the mistake is detectable - once copied into the keychain the
+    // two files are indistinguishable from a legitimately distinct pair.
+    fprintf(stderr,
+            "Error: Could not compare '%s' and '%s' to verify they hold different key "
+            "material (a file could not be read, or memory for the comparison could not "
+            "be allocated). Refusing to add the contact rather than risk installing one "
+            "pad for both directions - resolve the failure and retry.\n",
+            encryption_key_file, decryption_key_file);
+    return -1;
+  }
   if (overlap != KEY_OVERLAP_NONE)
   {
     fprintf(stderr,
@@ -1317,9 +1348,20 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   // Recover from any operation an earlier run left incomplete before
   // doing anything else.
   CommitRecovery rec;
-  commit_reconcile(keychain_dir, contact_name, "enc", c->EncryptionKeyPath,
-                    c->EncryptionKeyOffset, c->EncryptionKeySize,
-                    c->EncryptedSequence, &rec);
+  if (commit_reconcile(keychain_dir, contact_name, "enc", c->EncryptionKeyPath,
+                        c->EncryptionKeyOffset, c->EncryptionKeySize,
+                        c->EncryptedSequence, &rec) != 0)
+  {
+    // COMMIT_RECOVER_BLOCKED: the key file could not be read, so the
+    // pending artifact was kept. Abort rather than continue - staging
+    // new output next to a kept artifact would get one of them
+    // discarded as an "unexpected extra" on the next reconciliation.
+    fprintf(stderr,
+            "Error: cannot reconcile the pending encryption artifact for '%s'; "
+            "it was kept - resolve the key file problem and run again\n",
+            contact_name);
+    return -1;
+  }
 
   if (rec.action == COMMIT_RECOVER_ERROR)
   {
@@ -1625,9 +1667,20 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   }
 
   CommitRecovery rec;
-  commit_reconcile(keychain_dir, contact_name, "dec", c->DecryptionKeyPath,
-                    c->DecryptionKeyOffset, c->DecryptionKeySize,
-                    c->DecryptedSequence, &rec);
+  if (commit_reconcile(keychain_dir, contact_name, "dec", c->DecryptionKeyPath,
+                        c->DecryptionKeyOffset, c->DecryptionKeySize,
+                        c->DecryptedSequence, &rec) != 0)
+  {
+    // COMMIT_RECOVER_BLOCKED: the key file could not be read. The kept
+    // artifact is the ONLY copy of a recovered plaintext whose key
+    // bytes are already spent - abort so a later run can reconcile and
+    // redeliver it once the key file is readable again.
+    fprintf(stderr,
+            "Error: cannot reconcile the pending decryption artifact for '%s'; "
+            "it was kept - resolve the key file problem and run again\n",
+            contact_name);
+    return -1;
+  }
 
   if (rec.action == COMMIT_RECOVER_ERROR)
   {

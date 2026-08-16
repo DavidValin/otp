@@ -844,6 +844,49 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+#  the identical-key check must fail closed, not open
+#
+#  If the comparison itself cannot run (out of memory, out of file
+#  descriptors), that proves nothing about the keys - reporting it as
+#  "no overlap" would let two byte-identical pads through, breaking the
+#  pad silently and forever. OTP_TEST_FAIL_KEY_COMPARE simulates the
+#  comparison's resource acquisitions failing; even a legitimate,
+#  genuinely distinct pair must then be refused, since the tool cannot
+#  tell it apart from an identical one.
+# -----------------------------------------------------------------------------
+
+echo "     Testing that a failed key comparison refuses rather than accepts..."
+
+OTP_TEST_FAIL_KEY_COMPARE=1 ./bin/otp --add-contact failclosed kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_failcmp.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^failclosed")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - an uncomparable key pair is refused, creating nothing"
+else
+  echo "     ! FAIL - keys were accepted although the overlap check never ran (exit $RC)"
+  exit 1
+fi
+
+grep -q "Could not compare" kc_failcmp.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the refusal names the comparison failure, not a key overlap"
+else
+  echo "     ! FAIL - refusal reason not explained"
+  cat kc_failcmp.log
+  exit 1
+fi
+
+./bin/otp --add-contact failclosed kc_dupkey.txt kc_otherkey.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the same pair is accepted once the comparison can run"
+else
+  echo "     ! FAIL - pair still refused without the injected failure"
+  exit 1
+fi
+./bin/otp --remove-contact failclosed > /dev/null 2>&1
+rm -f kc_failcmp.log
+
+# -----------------------------------------------------------------------------
 #  re-using a contact name must warn about already-spent key material
 #
 #  Once a contact is removed its key files are gone, so nothing remains to

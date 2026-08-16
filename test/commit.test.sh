@@ -976,12 +976,14 @@ fi
 rm -f commit_xkey.txt commit_xmsg.txt commit_xout.bin commit_xexp.bin commit_xerr.log
 
 # -----------------------------------------------------------------------------
-#  a pending artifact whose key file has gone missing
+#  a pending artifact whose key file cannot be read
 #
 #  Reconciliation compares the artifact's recorded range against the key
-#  file's real size. If the key file cannot be read at all there is no
-#  basis for any conclusion, so the artifact is discarded rather than
-#  reconciled against a size that could not be established.
+#  file's real size. If the key file cannot be read there is no basis for
+#  any conclusion - but the failure may be transient, so the artifact is
+#  KEPT and the run aborted, letting a later run reconcile it once the
+#  key file is readable again. Discarding it here would destroy, on the
+#  decrypt side, the only copy of a recovered plaintext.
 # -----------------------------------------------------------------------------
 
 echo "     Testing reconciliation when the key file is unreadable..."
@@ -991,16 +993,16 @@ dd if=/dev/urandom of=commit_nkey.txt.dec bs=1 count=$(wc -c < commit_nkey.txt) 
 ./bin/otp --add-contact nokeyfile commit_nkey.txt commit_nkey.txt.dec > /dev/null 2>&1
 
 printf 'orphaned payload' > ".keychain/nokeyfile_enc_pending_seq1_off0_len16.bin"
-rm -f .keychain/nokeyfile_enc.key
+mv .keychain/nokeyfile_enc.key commit_nkey_hidden.bin
 
 printf 'attempt' | ./bin/otp -c nokeyfile --encrypt > /dev/null 2>commit_nerr.log
 RC=$?
-grep -q "cannot stat key file" commit_nerr.log
+grep -q "keeping the pending artifact" commit_nerr.log
 G1=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nokeyfile_enc_pending")
 
-if [ $RC -ne 0 ] && [ $G1 -eq 0 ] && [ "$LEFT" = "0" ]; then
-  echo "     - PASS - an unreconcilable artifact is discarded and the run aborts"
+if [ $RC -ne 0 ] && [ $G1 -eq 0 ] && [ "$LEFT" = "1" ]; then
+  echo "     - PASS - the artifact is kept and the run aborts"
 else
   echo "     ! FAIL - missing key file during reconcile mishandled (exit $RC, warn $G1, $LEFT left)"
   cat commit_nerr.log
@@ -1015,8 +1017,102 @@ else
   exit 1
 fi
 
+# Once the key file is back, the kept artifact must reconcile normally:
+# this one was never committed (window 1), so it is discarded as stale
+# and the run proceeds.
+mv commit_nkey_hidden.bin .keychain/nokeyfile_enc.key
+printf 'attempt' | ./bin/otp -c nokeyfile --encrypt > /dev/null 2>commit_nerr2.log
+RC=$?
+LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nokeyfile_enc_pending")
+if [ $RC -eq 0 ] && [ "$LEFT" = "0" ]; then
+  echo "     - PASS - the kept artifact reconciles once the key file is readable again"
+else
+  echo "     ! FAIL - kept artifact not reconciled after the failure cleared (exit $RC, $LEFT left)"
+  cat commit_nerr2.log
+  exit 1
+fi
+
 ./bin/otp --remove-contact nokeyfile > /dev/null 2>&1
-rm -f commit_nkey.txt commit_nerr.log
+rm -f commit_nkey.txt commit_nkey.txt.dec commit_nerr.log commit_nerr2.log
+
+# -----------------------------------------------------------------------------
+#  decrypt side: an unreadable key file must not cost the plaintext
+#
+#  After a window-2 crash the pending artifact holds the ONLY copy of the
+#  recovered plaintext - the key bytes that produced it are already
+#  truncated away on both sides. If the key file then cannot be statted
+#  while reconciling (a transient mount hiccup, fd exhaustion), the
+#  artifact must survive the aborted run so that a later run can
+#  redeliver it. Discarding it would lose the message forever, which is
+#  exactly what the commit machinery exists to prevent.
+# -----------------------------------------------------------------------------
+
+echo "     Testing that an unreadable key file cannot destroy recovered plaintext..."
+
+dd if=/dev/urandom of=commit_ndkey.txt bs=1 count=1000 2>/dev/null
+dd if=/dev/urandom of=commit_ndkey.txt.dec bs=1 count=1000 2>/dev/null
+./bin/otp --add-contact nodeckey commit_ndkey.txt commit_ndkey.txt.dec > /dev/null 2>&1
+
+printf 'sole surviving copy of this message' > commit_ndplain.txt
+# The peer encrypts with what is our DECRYPTION key.
+expected_cipher commit_ndkey.txt.dec commit_ndplain.txt 0 commit_ndcipher.bin
+
+OTP_TEST_CRASH_POINT=after_key_publish ./bin/otp -c nodeckey --decrypt < commit_ndcipher.bin > /dev/null 2>/dev/null
+if [ $? -eq 77 ]; then
+  echo "     - PASS - simulated crash landed after the key bytes were spent"
+else
+  echo "     ! FAIL - simulated crash did not trigger as expected"
+  exit 1
+fi
+
+# Make the key file unstattable for the recovery run, keeping a copy so
+# the "failure" is transient.
+mv .keychain/nodeckey_dec.key commit_ndkey_hidden.bin
+
+printf 'ignored' | ./bin/otp -c nodeckey --decrypt > /dev/null 2>commit_nderr.log
+RC=$?
+grep -q "keeping the pending artifact" commit_nderr.log
+G1=$?
+PENDING=$(ls .keychain/nodeckey_dec_pending_seq* 2>/dev/null | head -n 1)
+
+if [ $RC -ne 0 ] && [ $G1 -eq 0 ] && [ -n "$PENDING" ]; then
+  echo "     - PASS - the run aborts and the plaintext artifact survives"
+else
+  echo "     ! FAIL - recovery with an unreadable key file mishandled (exit $RC, warn $G1, pending '$PENDING')"
+  cat commit_nderr.log
+  exit 1
+fi
+
+cmp -s "$PENDING" commit_ndplain.txt
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the kept artifact is byte-for-byte the missing plaintext"
+else
+  echo "     ! FAIL - the kept artifact does not hold the plaintext"
+  exit 1
+fi
+
+# The failure clears; the next run must finish the interrupted commit and
+# redeliver the plaintext intact.
+mv commit_ndkey_hidden.bin .keychain/nodeckey_dec.key
+
+printf 'ignored' | ./bin/otp -c nodeckey --decrypt > commit_ndout.bin 2>commit_nderr2.log
+grep -q "Recovered incomplete delivery" commit_nderr2.log
+G2=$?
+cmp -s commit_ndout.bin commit_ndplain.txt
+C2=$?
+LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nodeckey_dec_pending")
+
+if [ $G2 -eq 0 ] && [ $C2 -eq 0 ] && [ "$LEFT" = "0" ]; then
+  echo "     - PASS - once the key file is back the message is redelivered intact"
+else
+  echo "     ! FAIL - redelivery after the failure cleared went wrong (recover $G2, cmp $C2, $LEFT left)"
+  cat commit_nderr2.log
+  exit 1
+fi
+
+./bin/otp --remove-contact nodeckey > /dev/null 2>&1
+rm -f commit_ndkey.txt commit_ndkey.txt.dec commit_ndplain.txt commit_ndcipher.bin commit_ndout.bin
+rm -f commit_nderr.log commit_nderr2.log
 
 # -----------------------------------------------------------------------------
 #  I/O failures while committing

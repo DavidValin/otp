@@ -81,7 +81,8 @@ typedef enum
   COMMIT_RECOVER_DISCARD,    /* commit never started - discarded, nothing lost */
   COMMIT_RECOVER_FINISH,     /* key file committed, .meta was stale - finish it */
   COMMIT_RECOVER_DELIVER,    /* fully committed already - just redeliver */
-  COMMIT_RECOVER_ERROR       /* state didn't match any known-safe window - discarded defensively */
+  COMMIT_RECOVER_ERROR,      /* state didn't match any known-safe window - discarded defensively */
+  COMMIT_RECOVER_BLOCKED     /* key file unreadable - artifact KEPT, caller must abort the run */
 } CommitRecoverAction;
 
 typedef struct
@@ -100,8 +101,13 @@ typedef struct
  * physical size of `key_file_path` and the *declared* offset/size/
  * sequence the caller currently believes are committed (straight from the
  * Contact struct). See README.md for the truth table this implements.
- * Returns 0 on a decisive outcome (including NONE), -1 only for a hard
- * I/O error while reconciling (out->action is also set to ERROR).
+ * Returns 0 on a decisive outcome (including NONE); -1 only when the key
+ * file itself cannot be statted (out->action is set to BLOCKED). In that
+ * case the pending artifact is deliberately left in place - on decrypt it
+ * is the only copy of the recovered plaintext - and the caller MUST abort
+ * the run rather than continue: if the stat failure were transient and the
+ * run proceeded, it would publish a second artifact next to the kept one,
+ * which the next reconciliation would discard as an unexpected extra.
  *
  * Also sweeps away any abandoned *staging* file for this contact and
  * direction - a partial write from a process that died before its output

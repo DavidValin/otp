@@ -454,10 +454,19 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   unsigned long long key_size_64;
   if (otp_file_size(key_file_path, &key_size_64) != 0)
   {
-    fprintf(stderr, "Warning: cannot stat key file %s while reconciling %s: %s\n",
+    /* Without the key file's size nothing can be reconciled - but the
+     * artifact must not be destroyed over what may be a transient
+     * failure: on decrypt it is the sole copy of the recovered
+     * plaintext, whose key bytes may already be gone. Keep it for a
+     * later run to reconcile once the key file is readable again. The
+     * caller must abort the whole run in response (see the header):
+     * proceeding would publish a second artifact alongside the kept
+     * one, and reconciliation discards "extra" artifacts on sight. */
+    fprintf(stderr,
+            "Warning: cannot stat key file %s while reconciling %s: %s - "
+            "keeping the pending artifact for a later attempt\n",
             key_file_path, found_path, strerror(errno));
-    unlink(found_path);
-    out->action = COMMIT_RECOVER_ERROR;
+    out->action = COMMIT_RECOVER_BLOCKED;
     return -1;
   }
   size_t actual_key_size = (size_t)key_size_64;
