@@ -20,7 +20,8 @@
 #include <stdio.h>
 
 /* ---- One-shot verified buffer write -----------------------------------
- * Writes `size` bytes of `data` to `tmp_path` (create/truncate, 0600),
+ * Writes `size` bytes of `data` to `tmp_path` (any leftover file there is
+ * removed first, then it is created exclusively with mode 0600),
  * fsyncs it, then reopens the file and compares every byte actually on
  * disk against `data`. On any failure the tmp file is removed and -1 is
  * returned; the caller must not proceed to commit_publish(). On success

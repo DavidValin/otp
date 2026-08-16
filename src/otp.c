@@ -67,15 +67,13 @@
 #ifndef O_BINARY
 #define O_BINARY _O_BINARY
 #endif
-/* flock()/LOCK_EX come from platform.h - a real LockFileEx-backed
- * implementation, not a no-op, so the direct key-file mode gets the same
- * locking guarantee on Windows as it already has on POSIX. */
-/* Map fstat to _fstat */
-/* Map struct stat to _stat */
+/* flock()/LOCK_EX come from platform.h's LockFileEx-backed shim, so the
+ * direct key-file mode gets the same locking guarantee on Windows as on
+ * POSIX. */
 #ifndef _MSC_VER
 struct stat;
 #endif
-/* Map localtime to localtime_s for thread safety */
+/* Map POSIX names to the CRT's underscore spellings */
 #define close _close
 #define open _open
 #define fstat _fstat
@@ -106,10 +104,10 @@ static void keypair_cleanup(FILE *files[KEYPAIR_FILES], char names[KEYPAIR_FILES
   }
 }
 
-/* Stream `size` bytes from stdin into two files at once. The pad is never
- * held whole in memory: generating a 1GB key pair used to need 2GB of
- * RAM, which put a ceiling on key sizes far below the 1TB the keychain
- * advertises. Peak usage here is one chunk regardless of key size. */
+/* Stream `size` bytes from stdin into two files at once, one chunk at a
+ * time. The pad is never held whole in memory: peak usage is one chunk
+ * regardless of key size, so key pairs can be far larger than RAM (the
+ * keychain accepts keys up to 1TB). */
 #define KEYPAIR_CHUNK (1024 * 1024)
 static int keypair_stream_pad(unsigned char *buf, size_t size,
                               FILE *dst1, FILE *dst2, const char *what)
@@ -506,7 +504,6 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Error reading key file %s\n", argv[optind]);
     goto fail;
   }
-  /* Reset infile to start for potential further use */
   fseek(infile, 0, SEEK_SET);
   /* Handle empty stdin early */
   int first = fgetc(stdin);

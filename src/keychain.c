@@ -466,7 +466,8 @@ static void parse_contact_fields(FILE *f, Contact *c)
       break;
 
     char key[256];
-    // Parse key=value manually to avoid sscanf width limitations
+    // Split at the first '='; the value is copied manually so its length
+    // is not capped by a sscanf field width (key file paths can be long)
     char *equals = strchr(line, '=');
     if (equals && sscanf(line, "%255[^=]", key) == 1)
     {
@@ -908,7 +909,6 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
   Contact *c = &g_keychain.contacts[g_keychain.count];
   memset(c, 0, sizeof(Contact));
 
-  // Use snprintf instead of strncpy to avoid truncation warnings
   snprintf(c->Name, MAX_NAME_LENGTH, "%s", name);
   snprintf(c->EncryptionKeyPath, sizeof(c->EncryptionKeyPath), "%s", enc_dest);
   c->EncryptionKeySize = enc_size;
@@ -1880,7 +1880,8 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   c->DecryptionKeySize = remaining_size;
   c->LastMessageReceivedAt = time(NULL);
 
-  // Save keychain
+  // Commit the contact's .meta file (the key file is already committed at
+  // this point - this is the second, final half of the pair).
   if (save_contact_meta(keychain_dir, c) != 0)
   {
     fprintf(stderr, "Error: Failed to save keychain\n");
