@@ -37,9 +37,9 @@ echo "     Testing concurrent operations on different contacts do not race..."
 
 dd if=/dev/urandom of=meta_keyA.txt bs=1 count=1000 2>/dev/null
 dd if=/dev/urandom of=meta_keyB.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=meta_keyA.txt.dec bs=1 count=$(wc -c < meta_keyA.txt) 2>/dev/null
+dd if=/dev/urandom of=meta_keyA.txt.dec bs=1 count=$(wc -c < meta_keyA.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact metaA meta_keyA.txt meta_keyA.txt.dec > /dev/null 2>&1
-dd if=/dev/urandom of=meta_keyB.txt.dec bs=1 count=$(wc -c < meta_keyB.txt) 2>/dev/null
+dd if=/dev/urandom of=meta_keyB.txt.dec bs=1 count=$(wc -c < meta_keyB.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact metaB meta_keyB.txt meta_keyB.txt.dec > /dev/null 2>&1
 
 printf 'message for contact A, padded to be a decent length AAAAAAAAAAAA' > meta_plainA.txt
@@ -125,7 +125,7 @@ rm -rf .keychain
 echo "     Testing that metadata size is independent of message size..."
 
 dd if=/dev/urandom of=meta_bigkey.txt bs=1048576 count=40 2>/dev/null
-dd if=/dev/urandom of=meta_bigkey.txt.dec bs=1 count=$(wc -c < meta_bigkey.txt) 2>/dev/null
+dd if=/dev/urandom of=meta_bigkey.txt.dec bs=1 count=$(wc -c < meta_bigkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact bulky meta_bigkey.txt meta_bigkey.txt.dec > /dev/null 2>&1
 
 META_EMPTY=$(wc -c < .keychain/bulky.meta | tr -d ' ')

@@ -38,7 +38,7 @@ echo "   - Per-contact locking"
 echo "     Testing lock file location..."
 
 dd if=/dev/urandom of=lock_key1.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=lock_key1.txt.dec bs=1 count=$(wc -c < lock_key1.txt) 2>/dev/null
+dd if=/dev/urandom of=lock_key1.txt.dec bs=1 count=$(wc -c < lock_key1.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact locktest1 lock_key1.txt lock_key1.txt.dec > /dev/null 2>&1
 
 printf 'trigger lock creation' | ./bin/otp -c locktest1 --encrypt > /dev/null 2>/dev/null
@@ -64,7 +64,7 @@ rm -rf .keychain
 echo "     Testing concurrent encrypt for the same contact does not reuse key material..."
 
 dd if=/dev/urandom of=lock_key2.txt bs=1 count=4000 2>/dev/null
-dd if=/dev/urandom of=lock_key2.txt.dec bs=1 count=$(wc -c < lock_key2.txt) 2>/dev/null
+dd if=/dev/urandom of=lock_key2.txt.dec bs=1 count=$(wc -c < lock_key2.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact locktest2 lock_key2.txt lock_key2.txt.dec > /dev/null 2>&1
 
 printf 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > lock_plainA.txt
@@ -162,7 +162,7 @@ rm -f lock_stderrA.log lock_stderrB.log
 echo "     Testing concurrent decrypt for the same contact does not reuse key material..."
 
 dd if=/dev/urandom of=lock_key3.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=lock_key3.txt.dec bs=1 count=$(wc -c < lock_key3.txt) 2>/dev/null
+dd if=/dev/urandom of=lock_key3.txt.dec bs=1 count=$(wc -c < lock_key3.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact locktest3 lock_key3.txt lock_key3.txt.dec > /dev/null 2>&1
 
 # Same length, so exactly one of {0, LEN} is each output's true key range

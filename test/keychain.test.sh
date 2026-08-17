@@ -458,7 +458,7 @@ fi
 
 # Create contact with very small key
 dd if=/dev/urandom of=smallkey.txt bs=1 count=5 2>/dev/null
-dd if=/dev/urandom of=smallkey.txt.dec bs=1 count=$(wc -c < smallkey.txt) 2>/dev/null
+dd if=/dev/urandom of=smallkey.txt.dec bs=1 count=$(wc -c < smallkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact smallkeytest smallkey.txt smallkey.txt.dec > /dev/null 2>&1
 
 # Try to encrypt a message larger than the key
@@ -494,7 +494,7 @@ echo "     Testing multi-chunk message exceeding key size does not consume key..
 
 # Key spans more than one 4MB streaming chunk
 dd if=/dev/urandom of=multichunk_key.txt bs=1M count=5 2>/dev/null
-dd if=/dev/urandom of=multichunk_key.txt.dec bs=1 count=$(wc -c < multichunk_key.txt) 2>/dev/null
+dd if=/dev/urandom of=multichunk_key.txt.dec bs=1 count=$(wc -c < multichunk_key.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact multichunktest multichunk_key.txt multichunk_key.txt.dec > /dev/null 2>&1
 
 # Message also spans multiple 4MB chunks and exceeds the 5MB key only once
@@ -727,7 +727,7 @@ done
 echo "     - ${GREEN}PASS${NC} - all $REJECTED invalid name forms rejected"
 
 # Ordinary names, including spaces and dots, must still work
-dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact "jane.doe smith" kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
 if [ $? -eq 0 ] && [ -f ".keychain/jane.doe smith.meta" ]; then
   echo "     - ${GREEN}PASS${NC} - ordinary names with dots and spaces are still accepted"
@@ -782,7 +782,7 @@ else
 fi
 
 # Both forms that are legitimate must still work
-dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact bothkeys kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
 RC1=$?
 ./bin/otp --add-contact nokeys > /dev/null 2>&1
@@ -795,7 +795,7 @@ else
 fi
 
 # Failures must exit 1, not a raw -1 surfacing as 255
-dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
+dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact bothkeys kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
 DUP_RC=$?
 ./bin/otp --remove-contact definitely_not_here > /dev/null 2>&1
