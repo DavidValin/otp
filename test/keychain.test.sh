@@ -246,7 +246,7 @@ echo "     Testing add contact with key files..."
 
 # Generate a key pair for testing
 rm -rf testalice_keys testbob_keys
-dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+dd if=/dev/urandom of=tmpkey bs=1048576 count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 testalice testbob > /dev/null 2>&1
 rm tmpkey
 
@@ -313,7 +313,7 @@ echo "     Testing encryption with contact..."
 
 # Create a contact with keys for testing (fresh keychain from here on)
 rm -rf .keychain enctest_keys dectest_keys
-dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+dd if=/dev/urandom of=tmpkey bs=1048576 count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 enctest dectest > /dev/null 2>&1
 rm tmpkey
 
@@ -440,7 +440,7 @@ echo "     Testing binary payload byte-exactness..."
 # Dedicated contacts, so the extra messages don't disturb the sequence
 # numbers and offsets other sections assert on enctest/dectest.
 rm -rf binenc_keys bindec_keys
-dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+dd if=/dev/urandom of=tmpkey bs=1048576 count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 binenc bindec > /dev/null 2>&1
 rm tmpkey
 ./bin/otp --add-contact binenc binenc_keys/encryption_for_bindec.key binenc_keys/decryption_from_bindec.key > /dev/null 2>&1
@@ -606,7 +606,7 @@ fi
 echo "     Testing multi-chunk message exceeding key size does not consume key..."
 
 # Key spans more than one 4MB streaming chunk
-dd if=/dev/urandom of=multichunk_key.txt bs=1M count=5 2>/dev/null
+dd if=/dev/urandom of=multichunk_key.txt bs=1048576 count=5 2>/dev/null
 dd if=/dev/urandom of=multichunk_key.txt.dec bs=1 count=$(wc -c < multichunk_key.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact multichunktest multichunk_key.txt multichunk_key.txt.dec > /dev/null 2>&1
 
@@ -615,7 +615,7 @@ dd if=/dev/urandom of=multichunk_key.txt.dec bs=1 count=$(wc -c < multichunk_key
 # have been written to real output before the overflow on the second chunk
 # was detected, leaking usable ciphertext for key bytes that still look
 # "unused" to the keychain.
-dd if=/dev/urandom of=bigmsg.txt bs=1M count=10 2>/dev/null
+dd if=/dev/urandom of=bigmsg.txt bs=1048576 count=10 2>/dev/null
 
 ./bin/otp -c multichunktest --encrypt < bigmsg.txt > multichunk_partial_output.bin 2>/dev/null
 RC=$?
@@ -737,7 +737,7 @@ OTP_BIN="$(pwd)/bin/otp"
 rm -rf alice_home bob_home alice_keys bob_keys
 mkdir -p alice_home bob_home
 
-dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+dd if=/dev/urandom of=tmpkey bs=1048576 count=2 2>/dev/null
 cat tmpkey | "$OTP_BIN" --new-key-pair 1 alice bob > /dev/null 2>&1
 rm tmpkey
 

@@ -20,7 +20,7 @@ export PARTB=partb
 # Generate key pair using test data as stdin (leftover directories from an
 # aborted earlier run would make the O_EXCL file creation fail)
 rm -rf ${PARTA}_keys ${PARTB}_keys
-dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+dd if=/dev/urandom of=tmpkey bs=1048576 count=2 2>/dev/null
 GEN_OUT=$(cat tmpkey | ./bin/otp --new-key-pair $KEY_SIZE_MB $PARTA $PARTB)
 rm tmpkey
 
@@ -55,7 +55,7 @@ else
   echo "     ! ${RED}FAIL${NC} - missing 'Store/Share the keys safely!' in output: $GEN_OUT"
   exit 1
 fi
-if printf '%s' "$GEN_OUT" | grep -q $'\x1b'; then
+if printf '%s' "$GEN_OUT" | grep -q "$(printf '\033')"; then
   echo "     ! ${RED}FAIL${NC} - ANSI escape codes leaked into non-terminal output"
   exit 1
 else
