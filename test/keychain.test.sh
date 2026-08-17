@@ -427,6 +427,118 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+#  test stdout carries the exact payload bytes and nothing else
+# -----------------------------------------------------------------------------
+# Encrypt and decrypt an arbitrary binary file (not text) and compare byte
+# counts and content at every step. This pins the invariant that all
+# informational output (key usage, prompts, recovery notes) goes to
+# stderr: a single extra byte on stdout would corrupt any binary payload,
+# and text comparisons above cannot detect it.
+
+echo "     Testing binary payload byte-exactness..."
+
+# Dedicated contacts, so the extra messages don't disturb the sequence
+# numbers and offsets other sections assert on enctest/dectest.
+rm -rf binenc_keys bindec_keys
+dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
+cat tmpkey | ./bin/otp --new-key-pair 1 binenc bindec > /dev/null 2>&1
+rm tmpkey
+./bin/otp --add-contact binenc binenc_keys/encryption_for_bindec.key binenc_keys/decryption_from_bindec.key > /dev/null 2>&1
+./bin/otp --add-contact bindec bindec_keys/encryption_for_binenc.key bindec_keys/decryption_from_binenc.key > /dev/null 2>&1
+
+BIN_BYTES=12345
+dd if=/dev/urandom of=kc_bin_orig bs=$BIN_BYTES count=1 2>/dev/null
+
+./bin/otp -c binenc --encrypt -y < kc_bin_orig > kc_bin_cipher 2>/dev/null
+CIPHER_SIZE=$(wc -c < kc_bin_cipher | tr -d ' ')
+if [ "$CIPHER_SIZE" = "$BIN_BYTES" ]; then
+  echo "     - ${GREEN}PASS${NC} - ciphertext on stdout is exactly the payload size ($BIN_BYTES bytes)"
+else
+  echo "     ! ${RED}FAIL${NC} - ciphertext is $CIPHER_SIZE bytes, expected exactly $BIN_BYTES"
+  exit 1
+fi
+
+./bin/otp -c bindec --decrypt -y < kc_bin_cipher > kc_bin_dec 2>/dev/null
+DEC_SIZE=$(wc -c < kc_bin_dec | tr -d ' ')
+if [ "$DEC_SIZE" = "$BIN_BYTES" ]; then
+  echo "     - ${GREEN}PASS${NC} - plaintext on stdout is exactly the payload size ($BIN_BYTES bytes)"
+else
+  echo "     ! ${RED}FAIL${NC} - decrypted output is $DEC_SIZE bytes, expected exactly $BIN_BYTES"
+  exit 1
+fi
+
+if cmp -s kc_bin_orig kc_bin_dec; then
+  echo "     - ${GREEN}PASS${NC} - binary payload round-trips bit-for-bit"
+else
+  echo "     ! ${RED}FAIL${NC} - decrypted binary payload differs from the original"
+  exit 1
+fi
+
+rm -f kc_bin_orig kc_bin_cipher kc_bin_dec
+rm -rf binenc_keys bindec_keys
+
+# -----------------------------------------------------------------------------
+#  test stderr report separation from the payload
+# -----------------------------------------------------------------------------
+# The payload on stdout is raw bytes with no trailing newline, so when
+# stdout is the terminal the stderr report must open with a blank line
+# (\n\n) or it starts mid-ciphertext on the shared line. When stdout is
+# redirected, the report must stay exactly as before - no leading blank
+# line - so nothing changes for scripts reading stderr.
+
+echo "     Testing stderr report separation from payload..."
+
+printf 'hola!' | ./bin/otp -c binenc --encrypt -y 2>kc_sep_err >/dev/null
+if [ -s kc_sep_err ] && [ "$(head -c 1 kc_sep_err | wc -l | tr -d ' ')" = "0" ]; then
+  echo "     - ${GREEN}PASS${NC} - no leading blank line when stdout is redirected"
+else
+  echo "     ! ${RED}FAIL${NC} - stderr report changed for redirected stdout: $(cat kc_sep_err)"
+  exit 1
+fi
+
+TTY_SEP_TESTED=""
+if script --version 2>/dev/null | grep -q util-linux; then
+  script -qec "printf 'hola!' | ./bin/otp -c binenc --encrypt -y 2>kc_sep_tty_err" /dev/null < /dev/null > /dev/null 2>&1
+  TTY_SEP_TESTED=1
+elif [ "$(uname)" = "Darwin" ]; then
+  script -q /dev/null sh -c "printf 'hola!' | ./bin/otp -c binenc --encrypt -y 2>kc_sep_tty_err" > /dev/null 2>&1
+  TTY_SEP_TESTED=1
+fi
+
+if [ -z "$TTY_SEP_TESTED" ]; then
+  echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
+elif [ "$(head -c 2 kc_sep_tty_err | wc -l | tr -d ' ')" = "2" ] && grep -q "Used 5 bytes" kc_sep_tty_err; then
+  echo "     - ${GREEN}PASS${NC} - report opens with a blank line when stdout is a terminal"
+else
+  echo "     ! ${RED}FAIL${NC} - expected the stderr report to start with \\n\\n on a terminal: $(cat kc_sep_tty_err 2>/dev/null)"
+  exit 1
+fi
+
+# Note the case above also proves the report is PLAIN when stderr is
+# captured to a file. With stderr left on the pseudo-terminal instead,
+# the report must be rendered in green (ANSI \x1b[32m).
+KC_ESC=$(printf '\033')
+KC_TTY_COLOR_TESTED=""
+if script --version 2>/dev/null | grep -q util-linux; then
+  script -qec "printf 'hola!' | ./bin/otp -c binenc --encrypt -y" kc_sep_tty_out < /dev/null > /dev/null 2>&1
+  KC_TTY_COLOR_TESTED=1
+elif [ "$(uname)" = "Darwin" ]; then
+  script -q kc_sep_tty_out sh -c "printf 'hola!' | ./bin/otp -c binenc --encrypt -y" > /dev/null 2>&1
+  KC_TTY_COLOR_TESTED=1
+fi
+
+if [ -z "$KC_TTY_COLOR_TESTED" ]; then
+  echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
+elif grep -aq "${KC_ESC}\[32mUsed 5 bytes" kc_sep_tty_out; then
+  echo "     - ${GREEN}PASS${NC} - report is rendered in green when stderr is a terminal"
+else
+  echo "     ! ${RED}FAIL${NC} - expected a green (ESC[32m) report on a terminal stderr"
+  exit 1
+fi
+
+rm -f kc_sep_err kc_sep_tty_err kc_sep_tty_out
+
+# -----------------------------------------------------------------------------
 #  test error: contact not found
 # -----------------------------------------------------------------------------
 

@@ -59,6 +59,26 @@
 #define O_BINARY_FLAG 0
 #endif
 
+// Is stdout an interactive terminal? Decides whether the post-delivery
+// stderr report needs to open with a blank line: on a shared terminal the
+// payload just written to stdout is raw bytes with no trailing newline,
+// so without it the report starts mid-ciphertext on the same line. When
+// stdout is redirected (the normal scripted use) no separation is needed
+// - stderr is on its own device and must stay exactly as before.
+#ifdef _WIN32
+#define keychain_stdout_is_tty() _isatty(_fileno(stdout))
+#define keychain_stderr_is_tty() _isatty(_fileno(stderr))
+#else
+#define keychain_stdout_is_tty() isatty(fileno(stdout))
+#define keychain_stderr_is_tty() isatty(fileno(stderr))
+#endif
+
+// ANSI color for the post-delivery report; emitted only when stderr
+// itself is a terminal, so captured or redirected stderr stays plain
+// text for scripts and logs.
+#define KEYCHAIN_GREEN "\x1b[32m"
+#define KEYCHAIN_RESET "\x1b[0m"
+
 // Global keychain instance
 Keychain g_keychain = {0};
 
@@ -2437,9 +2457,19 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   }
   commit_discard_path(pending_final_path);
 
-  // Print info to stderr
-  fprintf(stderr, "Used %zu bytes from encryption key for contact '%s'\n", total_bytes, contact_name);
-  fprintf(stderr, "Remaining encryption key: %zu bytes\n", c->EncryptionKeySize);
+  // Print info to stderr, separated from the ciphertext by a blank line
+  // when both share the terminal, and in green when stderr is a terminal
+  if (keychain_stdout_is_tty())
+    fprintf(stderr, "\n\n");
+  {
+    int err_tty = keychain_stderr_is_tty();
+    fprintf(stderr, "%sUsed %zu bytes from encryption key for contact '%s'%s\n",
+            err_tty ? KEYCHAIN_GREEN : "", total_bytes, contact_name,
+            err_tty ? KEYCHAIN_RESET : "");
+    fprintf(stderr, "%sRemaining encryption key: %zu bytes%s\n",
+            err_tty ? KEYCHAIN_GREEN : "", c->EncryptionKeySize,
+            err_tty ? KEYCHAIN_RESET : "");
+  }
 
   return 0;
 }
@@ -2770,9 +2800,19 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   }
   commit_discard_path(pending_final_path);
 
-  // Print info to stderr
-  fprintf(stderr, "Used %zu bytes from decryption key for contact '%s'\n", total_bytes, contact_name);
-  fprintf(stderr, "Remaining decryption key: %zu bytes\n", c->DecryptionKeySize);
+  // Print info to stderr, separated from the plaintext by a blank line
+  // when both share the terminal, and in green when stderr is a terminal
+  if (keychain_stdout_is_tty())
+    fprintf(stderr, "\n\n");
+  {
+    int err_tty = keychain_stderr_is_tty();
+    fprintf(stderr, "%sUsed %zu bytes from decryption key for contact '%s'%s\n",
+            err_tty ? KEYCHAIN_GREEN : "", total_bytes, contact_name,
+            err_tty ? KEYCHAIN_RESET : "");
+    fprintf(stderr, "%sRemaining decryption key: %zu bytes%s\n",
+            err_tty ? KEYCHAIN_GREEN : "", c->DecryptionKeySize,
+            err_tty ? KEYCHAIN_RESET : "");
+  }
 
   return 0;
 }
