@@ -15,7 +15,7 @@
 #include "keychain.h"
 #include "cipher.h"
 #include "commit.h"
-#include "platform.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -1156,7 +1156,7 @@ int load_keychain(void)
 
   // Every contact lives in its own <name>.meta file inside the keychain
   // directory - load each one. opendir/readdir/closedir come from
-  // platform.h, which is a real dirent-backed implementation on POSIX
+  // compat.h, which is a real dirent-backed implementation on POSIX
   // and a FindFirstFile/FindNextFile-backed shim on Windows, so this
   // loop is identical on both platforms.
   DIR *d = opendir(keychain_dir);

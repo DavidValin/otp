@@ -1,6 +1,6 @@
 /*****************************************************************************\
  *                                                                           *
- *   platform.h - Cross-platform compatibility shims                         *
+ *   compat.h - Cross-platform compatibility shims                           *
  *                                                                           *
  *   Provides opendir/readdir/closedir and flock()/LOCK_EX/LOCK_UN on        *
  *   Windows, backed by the Win32 FindFirstFile/FindNextFile/FindClose and   *
@@ -50,8 +50,8 @@
  *                                                                           *
  \****************************************************************************/
 
-#ifndef OTP_PLATFORM_H
-#define OTP_PLATFORM_H
+#ifndef OTP_COMPAT_H
+#define OTP_COMPAT_H
 
 #ifdef _WIN32
 
@@ -293,4 +293,4 @@ static inline int otp_size_to_size_t(unsigned long long v, size_t *out)
   return 0;
 }
 
-#endif /* OTP_PLATFORM_H */
+#endif /* OTP_COMPAT_H */

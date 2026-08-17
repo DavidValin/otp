@@ -21,7 +21,7 @@
 #include "cipher.h"
 #include "keychain.h"
 #include "commit.h"
-#include "platform.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>

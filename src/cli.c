@@ -34,7 +34,7 @@
 
 #include "keychain.h"
 #include "cipher.h"
-#include "platform.h"
+#include "compat.h"
 
 #ifndef _WIN32
 #define O_BINARY 0

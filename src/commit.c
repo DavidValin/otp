@@ -12,7 +12,7 @@
 #endif
 
 #include "commit.h"
-#include "platform.h"
+#include "compat.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -292,7 +292,7 @@ int commit_publish(const char *tmp_path, const char *final_path)
 {
   /* otp_rename_replace(), not rename(): every publish here lands on a path
    * that already exists, and the Windows CRT rename() refuses that. See
-   * platform.h. */
+   * compat.h. */
   if (otp_rename_replace(tmp_path, final_path) != 0)
   {
     fprintf(stderr, "Error: failed to publish %s -> %s: %s\n", tmp_path, final_path, strerror(errno));
@@ -586,7 +586,7 @@ int contact_lock_acquire(ContactLock *lock, const char *keychain_dir, const char
   /* Blocks until any other process holding this contact's lock releases
    * it - including via crash or kill, since the OS drops the lock as
    * soon as the holding file descriptor closes (POSIX flock() and the
-   * Windows LockFileEx-backed shim in platform.h both guarantee this). */
+   * Windows LockFileEx-backed shim in compat.h both guarantee this). */
   if (flock(fd, LOCK_EX) != 0)
   {
     fprintf(stderr, "Error: failed to lock %s: %s\n", lock->path, strerror(errno));
