@@ -128,6 +128,35 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
  * directory after it is gone. */
 void commit_discard_all_pending(const char *keychain_dir, const char *contact);
 
+/* ---- Read-only status classification -------------------------------------
+ * What commit_reconcile() WOULD decide, computed without acting on any of
+ * it: no staging-file sweep, no artifact discard, no metadata correction,
+ * no unlink of anything. This is what lets --status report a contact's
+ * pending state while guaranteeing every byte in the keychain directory
+ * is identical before and after the call. The three-window truth table is
+ * the very same code commit_reconcile() runs (classify_window() in
+ * commit.c), so the report and the recovery can never drift apart.
+ */
+typedef struct
+{
+  CommitRecoverAction action; /* what the next operation's reconcile will do */
+  size_t sequence;            /* the artifact's own filename tag; 0 if none */
+  size_t range_offset;
+  size_t range_length;
+  size_t corrected_offset;    /* only meaningful for COMMIT_RECOVER_FINISH */
+  size_t corrected_size;
+  int stale_staging;          /* abandoned staging files seen (informational) */
+  int extra_artifacts;        /* artifacts beyond the first seen (abnormal) */
+} CommitStatus;
+
+/* Same inputs and same 0/-1 contract as commit_reconcile() (with -1 again
+ * meaning the key file could not be sized and out->action is BLOCKED),
+ * minus `declared_sequence`, which reconcile itself never consults. */
+int commit_classify(const char *keychain_dir, const char *contact,
+                    const char *direction, const char *key_file_path,
+                    size_t declared_offset, size_t declared_size,
+                    CommitStatus *out);
+
 /* ---- Per-contact mutual exclusion --------------------------------------
  * Guards against two processes concurrently running encrypt/decrypt (or
  * remove) for the *same* contact. This is a distinct problem from

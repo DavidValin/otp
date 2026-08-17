@@ -1,6 +1,6 @@
 # OTP manual page
 
-.TH OTP 1 "2026-08-17" "OTP v1.3.1" "User Commands"
+.TH OTP 1 "2026-08-17" "OTP v1.4.0" "User Commands"
 
 .SH NAME
 otp \- simple one-time pad encryption/decryption utility
@@ -32,6 +32,12 @@ otp \- simple one-time pad encryption/decryption utility
 .br
 .B otp
 [-c | --contact] <contact_name> --decrypt
+.br
+.B otp
+[-st | --status] <contact_name> [--porcelain]
+.br
+.B otp
+[-rl | --recover-last] <contact_name> --sent|--received
 
 .SH DESCRIPTION
 This program takes data from standard input, XORs it with one-time-pad key material held in a keychain of contacts, and writes the result to standard output.  Consumed key material is removed from the key files automatically, so a spent key range can never be reused.  It also allows generating key pairs and managing the keychain of contacts.
@@ -76,6 +82,14 @@ Decrypt data from stdin using the contact's decryption key and write the plain t
 .TP
 .B \-y, \-\-assume-delivered
 Skip the delivery-confirmation prompt when encrypting or decrypting with a contact.  Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order they were sent, complete, exactly once; before spending key on any message after a direction's first, otp asks on the terminal (never on stdin, which carries the message itself) whether the previous message arrived and decoded correctly, and cancels with the keys untouched unless answered yes.  Pass this flag (or set the OTP_ASSUME_DELIVERED environment variable to 1) once delivery has been confirmed out of band; scripts must do so explicitly, because with no terminal available the operation fails closed rather than assuming delivery.
+
+.TP
+.B \-st, \-\-status <contact_name> [\-\-porcelain]
+Report the contact's per-direction state, verified from the disk files themselves: the key file's physical size is the authority on remaining key material (never the metadata alone), the metadata declarations are cross-checked against it, pending crash-recovery artifacts are classified by the same code recovery itself runs, and the kept last-payload copies indicate whether the last sent/received message still awaits delivery confirmation.  With \fB--porcelain\fP, prints stable key=value lines (contact, and per direction: sequence, key_remaining, meta_state, redelivery_pending, ack_outstanding) for scripts.  Strictly read-only: it never deletes, truncates, renames or heals anything; the keychain directory is byte-identical before and after.  See EXIT STATUS and EXTERNAL INTEGRATION.
+
+.TP
+.B \-rl, \-\-recover-last <contact_name> \-\-sent|\-\-received
+Stream the kept safety copy of the last delivered payload to standard output: \fB--sent\fP re-emits the exact ciphertext of the last encrypt (the re-transmission source when a message was lost in transit - the same bytes remain valid for the receiver's current key position; never re-encrypt), \fB--received\fP the exact plaintext of the last decrypt (the only remaining decryption once its key bytes are destroyed).  Read-only and repeatable: the copy is never deleted by this command, not even after a fully successful stream - only the next operation in the same direction removes it, when delivery is confirmed (interactive yes or \fB-y\fP).  See EXIT STATUS.
 
 .SH USAGE
 
@@ -502,9 +516,44 @@ The output is valid, but it belongs to the earlier message. Run the command agai
 .B 1
 An error occurred; nothing was delivered and no key material was consumed.
 .PP
+For
+.B \-\-status:
+.TP
+.B 0
+Clean and ready in both directions.
+.TP
+.B 4
+Redelivery pending: an interrupted run left a committed message; the next operation in that direction will re-emit it (exit 3) and will not process its own input.
+.TP
+.B 5
+Delivery confirmation outstanding: the last sent/received message has not yet been confirmed delivered; pass \fB-y\fP on the next operation once confirmed out of band.
+.TP
+.B 6
+Key material rolled back: the key file is larger than the metadata records, so its leading bytes were already spent once.  Re-key the contact before sending or receiving anything.
+.TP
+.B 1
+An error occurred (unknown contact, unreadable key file).
+.PP
+For
+.B \-\-recover-last:
+0 the copy was streamed, 2 no copy exists (nothing awaits delivery confirmation in that direction), 1 an error occurred.
+.PP
 All other keychain commands return 0 on success and 1 on failure, except
 .B \-\-has-contact,
 which returns 0 if the contact exists and 1 if it does not.
+
+.SH EXTERNAL INTEGRATION
+A program driving otp needs no library: encrypt/decrypt are stdin-to-stdout filters with distinct exit codes, and the two read-only query commands answer everything a client must know before its next operation.  Per contact, the loop is:
+.RS
+.br
+1. \fBotp --status <contact> --porcelain\fP.  Exit 4: run the operation with empty input to redeliver the recovered message (exit 3), transmit or deliver it, ack it.  Exit 5: wait for the peer's acknowledgement; if the transport lost the message, re-transmit the same bytes from \fBotp --recover-last <contact> --sent\fP (never re-encrypt), or on the receive side re-deliver the plaintext from \fB--recover-last <contact> --received\fP.
+.br
+2. Run the operation with \fB-y\fP - the client's assertion, licensed by the peer's acknowledgement of the previous message, that delivery was confirmed.  Exit 0: transmit/deliver, keep a copy until acked.  Exit 3: the output is a recovered earlier message and the input was not processed - handle it, then re-run.  Exit 1: nothing was spent; safe to retry.
+.br
+3. On the receive side, send the acknowledgement only after the decrypted plaintext reached the application intact - that acknowledgement is what licenses the sender's next \fB-y\fP.
+.RE
+.PP
+Re-transmission always uses the stored ciphertext bytes, never a fresh encryption, so no key range is ever spent twice for one message and the receiver's key position stays aligned.  Both query commands are strictly read-only, so every crash-safety and key-reuse protection described above applies unchanged.  The full flow, with the recovery ladder, is in the "External Integrations" section of README.md.
 
 .SH TRUE RANDOM KEY GENERATOR
 Only a true random key makes this algorithm unbreakable. To generate a true random key consider

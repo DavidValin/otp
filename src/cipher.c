@@ -1408,3 +1408,283 @@ int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output)
   contact_lock_release(&lock);
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// --status / --recover-last: the read-only query surface for external
+// integrations (see the "External Integrations" section of README.md).
+//
+// An integrated program driving otp needs, per contact and direction,
+// exactly the answers the operational paths already derive from disk on
+// every run: is a crash-recovery redelivery pending (the next operation
+// would re-emit a committed earlier message instead of processing its
+// input), is the last delivered message still awaiting the out-of-band
+// delivery confirmation, how much key physically remains, and do the
+// .meta declarations agree with the key file. --status computes all of
+// that with the same primitives the operations use - commit_classify()
+// shares its truth table with commit_reconcile(), and the key file's
+// physical size is the authority exactly as in resync_key_size() - but
+// performs none of their actions: no sweep, no discard, no self-heal, no
+// deletion. Both commands run under the contact lock so the snapshot
+// cannot interleave with a live operation.
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+  size_t sequence;                  // messages committed in this direction
+  unsigned long long key_remaining; // physical key file size - the authority
+  const char *meta_state;           // "consistent" | "meta_behind" | "rolled_back"
+  int redelivery_pending;           // next op will redeliver, not process input
+  size_t pending_sequence;          // the artifact's filename tag, when pending
+  size_t pending_offset;
+  size_t pending_length;
+  int ack_outstanding;              // kept last-payload copy exists
+  char copy_path[600];
+} DirStatus;
+
+static int status_direction(const char *keychain_dir, Contact *c,
+                            int is_encrypt, DirStatus *out)
+{
+  const char *key_path = is_encrypt ? c->EncryptionKeyPath : c->DecryptionKeyPath;
+  size_t declared_offset = is_encrypt ? c->EncryptionKeyOffset : c->DecryptionKeyOffset;
+  size_t declared_size = is_encrypt ? c->EncryptionKeySize : c->DecryptionKeySize;
+
+  memset(out, 0, sizeof(*out));
+  out->sequence = is_encrypt ? c->EncryptedSequence : c->DecryptedSequence;
+  out->meta_state = "consistent";
+
+  last_copy_path(keychain_dir, c->Name, is_encrypt, out->copy_path, sizeof(out->copy_path));
+  unsigned long long copy_size;
+  out->ack_outstanding = (otp_file_size(out->copy_path, &copy_size) == 0);
+
+  if (key_path[0] == '\0')
+    return 0; // no key in this direction - nothing else to verify
+
+  unsigned long long physical;
+  if (otp_file_size(key_path, &physical) != 0)
+  {
+    fprintf(stderr, "Error: cannot stat %s key file '%s' for contact '%s': %s\n",
+            is_encrypt ? "encryption" : "decryption", key_path, c->Name, strerror(errno));
+    return -1;
+  }
+  out->key_remaining = physical;
+
+  CommitStatus cs;
+  if (commit_classify(keychain_dir, c->Name, is_encrypt ? "enc" : "dec",
+                      key_path, declared_offset, declared_size, &cs) != 0)
+  {
+    fprintf(stderr,
+            "Error: cannot classify the pending %s artifact for contact '%s' "
+            "(key file unreadable); nothing can be concluded about this direction\n",
+            is_encrypt ? "encryption" : "decryption", c->Name);
+    return -1;
+  }
+
+  if (cs.action == COMMIT_RECOVER_FINISH || cs.action == COMMIT_RECOVER_DELIVER)
+  {
+    out->redelivery_pending = 1;
+    out->pending_sequence = cs.sequence;
+    out->pending_offset = cs.range_offset;
+    out->pending_length = cs.range_length;
+    if (cs.action == COMMIT_RECOVER_FINISH)
+    {
+      // The key-file/.meta disagreement in this window is exactly the one
+      // the artifact's filename tag finishes deterministically on the
+      // next operation, so it is reported as consistent rather than as
+      // drift - and the committed sequence is the artifact's.
+      out->sequence = cs.sequence;
+      return 0;
+    }
+  }
+
+  // The same comparison resync_key_size() makes, reported instead of
+  // resolved: smaller-than-declared heals itself on the next operation;
+  // larger-than-declared can only mean rolled-back key material, whose
+  // leading bytes are already spent - the one fatal state.
+  if (physical < (unsigned long long)declared_size)
+    out->meta_state = "meta_behind";
+  else if (physical > (unsigned long long)declared_size)
+    out->meta_state = "rolled_back";
+  return 0;
+}
+
+static void status_print_direction(const char *contact_name, int is_encrypt,
+                                   const DirStatus *d, int porcelain)
+{
+  const char *p = is_encrypt ? "enc" : "dec";
+  if (porcelain)
+  {
+    printf("%s_sequence=%zu\n", p, d->sequence);
+    printf("%s_key_remaining=%llu\n", p, d->key_remaining);
+    printf("%s_meta_state=%s\n", p, d->meta_state);
+    printf("%s_redelivery_pending=%d\n", p, d->redelivery_pending);
+    printf("%s_ack_outstanding=%d\n", p, d->ack_outstanding);
+    return;
+  }
+
+  printf("  %s:\n", is_encrypt ? "Sending (encrypt)" : "Receiving (decrypt)");
+  printf("    Messages %s: %zu\n", is_encrypt ? "sent" : "received", d->sequence);
+  printf("    Key remaining: %llu bytes\n", d->key_remaining);
+  if (strcmp(d->meta_state, "consistent") == 0)
+    printf("    Metadata: consistent with the key file\n");
+  else if (strcmp(d->meta_state, "meta_behind") == 0)
+    printf("    Metadata: behind the key file (self-heals on the next operation)\n");
+  else
+    printf("    Metadata: KEY MATERIAL ROLLED BACK - the key file is larger than the "
+           "metadata records, so its leading bytes were already spent once. Re-key "
+           "this contact before %s anything.\n",
+           is_encrypt ? "sending" : "receiving");
+  if (d->redelivery_pending)
+    printf("    Crash recovery: the next --%s will REDELIVER message #%zu "
+           "(key range %zu-%zu) and will NOT process its own input\n",
+           is_encrypt ? "encrypt" : "decrypt", d->pending_sequence,
+           d->pending_offset, d->pending_offset + d->pending_length);
+  else
+    printf("    Crash recovery: nothing pending\n");
+  if (d->ack_outstanding)
+    printf("    Last %s message: awaiting delivery confirmation\n"
+           "      (exact %s kept at '%s'; stream it with: otp --recover-last %s %s)\n",
+           is_encrypt ? "sent" : "received",
+           is_encrypt ? "ciphertext" : "plaintext",
+           d->copy_path, contact_name,
+           is_encrypt ? "--sent" : "--received");
+  else if (d->sequence == 0)
+    printf("    Last %s message: none yet\n", is_encrypt ? "sent" : "received");
+  else
+    printf("    Last %s message: delivery confirmed\n", is_encrypt ? "sent" : "received");
+}
+
+int keychain_status(const char *contact_name, int porcelain)
+{
+  Contact *c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    return -1;
+  }
+
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  // Same lock-then-reload discipline as encrypt/decrypt, so the snapshot
+  // is of committed state, never of a moment inside another process's
+  // operation. Held only while reading; released before printing.
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, contact_name) != 0)
+    return -1;
+  if (load_keychain() != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+  c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  DirStatus enc, dec;
+  int rc = status_direction(keychain_dir, c, 1, &enc);
+  if (rc == 0)
+    rc = status_direction(keychain_dir, c, 0, &dec);
+  contact_lock_release(&lock);
+  if (rc != 0)
+    return -1;
+
+  if (porcelain)
+  {
+    printf("contact=%s\n", c->Name);
+    status_print_direction(c->Name, 1, &enc, 1);
+    status_print_direction(c->Name, 0, &dec, 1);
+  }
+  else
+  {
+    printf("\nContact: %s\n", c->Name);
+    status_print_direction(c->Name, 1, &enc, 0);
+    status_print_direction(c->Name, 0, &dec, 0);
+    printf("\n");
+  }
+
+  // One exit code for the most actionable condition across both
+  // directions, most severe first: a rollback must be re-keyed before
+  // anything else matters; a pending redelivery changes what the next
+  // operation's output IS; an outstanding confirmation only gates it.
+  if (strcmp(enc.meta_state, "rolled_back") == 0 || strcmp(dec.meta_state, "rolled_back") == 0)
+    return KEYCHAIN_STATUS_ROLLED_BACK;
+  if (enc.redelivery_pending || dec.redelivery_pending)
+    return KEYCHAIN_STATUS_REDELIVERY_PENDING;
+  if (enc.ack_outstanding || dec.ack_outstanding)
+    return KEYCHAIN_STATUS_ACK_OUTSTANDING;
+  return KEYCHAIN_STATUS_CLEAN;
+}
+
+int keychain_recover_last(const char *contact_name, int sent, FILE *output)
+{
+  Contact *c = find_contact(contact_name);
+  if (!c)
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    return -1;
+  }
+
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  // The lock is held across the stream so a concurrent operation cannot
+  // confirm delivery and remove the copy while it is being read.
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, contact_name) != 0)
+    return -1;
+  if (load_keychain() != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+  if (!find_contact(contact_name))
+  {
+    fprintf(stderr, "Error: Contact '%s' not found\n", contact_name);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  char src[600];
+  last_copy_path(keychain_dir, contact_name, sent, src, sizeof(src));
+
+  unsigned long long src_size;
+  if (otp_file_size(src, &src_size) != 0)
+  {
+    fprintf(stderr,
+            "No kept copy of the last %s for contact '%s' - nothing awaits "
+            "delivery confirmation in that direction.\n",
+            sent ? "sent ciphertext" : "received plaintext", contact_name);
+    contact_lock_release(&lock);
+    return KEYCHAIN_RECOVER_NO_COPY;
+  }
+
+  // deliver_pending_file streams and flush-checks but never deletes -
+  // exactly the semantics recovery needs: the copy must outlive every
+  // step whose success this process cannot verify, and only the next
+  // confirmed operation in this direction may remove it.
+  int rc = deliver_pending_file(src, output);
+  contact_lock_release(&lock);
+  if (rc != 0)
+    return -1;
+
+  fprintf(stderr,
+          "Recovered %llu bytes of the last %s for contact '%s'. The copy stays at "
+          "'%s' until a later operation confirms delivery.\n",
+          src_size, sent ? "sent ciphertext" : "received plaintext",
+          contact_name, src);
+  return 0;
+}

@@ -387,6 +387,41 @@ static void build_pending_prefixes(const char *contact, const char *direction,
   snprintf(stage_prefix, stage_size, "%s_%s_pending.", contact, direction);
 }
 
+/* The three-window recovery truth table (see README.md), as one pure
+ * function of the sizes involved. Both commit_reconcile() - which acts on
+ * the verdict - and commit_classify() - which only reports it - call this
+ * same code, so the report a --status consumer plans around is by
+ * construction the recovery the next operation will perform. */
+static CommitRecoverAction classify_window(size_t actual_key_size,
+                                           size_t declared_offset, size_t declared_size,
+                                           size_t found_offset, size_t found_len,
+                                           size_t *corrected_offset, size_t *corrected_size)
+{
+  if (actual_key_size == declared_size && declared_offset == found_offset)
+  {
+    /* Window 1: neither the key file nor the .meta file reflect this
+     * operation - it never committed. Nothing was ever spent or
+     * delivered, so the leftover artifact is simply stale. */
+    return COMMIT_RECOVER_DISCARD;
+  }
+  if (actual_key_size + found_len == declared_size && declared_offset == found_offset)
+  {
+    /* Window 2: the key file was already truncated for this operation,
+     * but the .meta file hasn't caught up. The commit can be finished
+     * using the values recorded in the artifact's own filename - no
+     * guessing. */
+    *corrected_offset = found_offset + found_len;
+    *corrected_size = actual_key_size;
+    return COMMIT_RECOVER_FINISH;
+  }
+  if (actual_key_size == declared_size && declared_offset == found_offset + found_len)
+  {
+    /* Window 3: fully committed already - only delivery/cleanup remains. */
+    return COMMIT_RECOVER_DELIVER;
+  }
+  return COMMIT_RECOVER_ERROR;
+}
+
 int commit_reconcile(const char *keychain_dir, const char *contact,
                       const char *direction, const char *key_file_path,
                       size_t declared_offset, size_t declared_size,
@@ -487,40 +522,99 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
   out->range_length = found_len;
   snprintf(out->pending_path, sizeof(out->pending_path), "%s", found_path);
 
-  if (actual_key_size == declared_size && declared_offset == found_offset)
+  out->action = classify_window(actual_key_size, declared_offset, declared_size,
+                                found_offset, found_len,
+                                &out->corrected_offset, &out->corrected_size);
+
+  switch (out->action)
   {
-    /* Window 1: neither the key file nor the .meta file reflect this
-     * operation - it never committed. Nothing was ever spent or
-     * delivered, so the leftover artifact is simply stale. */
+  case COMMIT_RECOVER_DISCARD:
+    /* Window 1 (never committed): the artifact is stale evidence. */
     unlink(found_path);
-    out->action = COMMIT_RECOVER_DISCARD;
+    return 0;
+  case COMMIT_RECOVER_FINISH:
+  case COMMIT_RECOVER_DELIVER:
+    return 0;
+  default:
+    fprintf(stderr,
+            "Warning: pending artifact %s does not match a recognized recovery state "
+            "(declared offset=%zu size=%zu, actual key size=%zu) - discarding without redelivery\n",
+            found_path, declared_offset, declared_size, actual_key_size);
+    unlink(found_path);
+    out->action = COMMIT_RECOVER_ERROR;
     return 0;
   }
+}
 
-  if (actual_key_size + found_len == declared_size && declared_offset == found_offset)
+int commit_classify(const char *keychain_dir, const char *contact,
+                    const char *direction, const char *key_file_path,
+                    size_t declared_offset, size_t declared_size,
+                    CommitStatus *out)
+{
+  memset(out, 0, sizeof(*out));
+  out->action = COMMIT_RECOVER_NONE;
+
+  DIR *d = opendir(keychain_dir);
+  if (!d)
+    return 0; /* no keychain dir yet - nothing pending */
+
+  char prefix[300], stage_prefix[300];
+  build_pending_prefixes(contact, direction, prefix, sizeof(prefix),
+                         stage_prefix, sizeof(stage_prefix));
+
+  /* Same scan order as commit_reconcile(), so "the" artifact classified
+   * here is the same one reconcile will act on - but strictly read-only:
+   * stale staging files and unexpected extras are counted, never removed.
+   * Cleanup belongs to the operational paths. */
+  struct dirent *entry;
+  size_t found_seq = 0, found_offset = 0, found_len = 0;
+  int found = 0;
+
+  while ((entry = readdir(d)) != NULL)
   {
-    /* Window 2: the key file was already truncated for this operation,
-     * but the .meta file hasn't caught up. Finish the commit using the
-     * values recorded in the artifact's own filename - no guessing. */
-    out->action = COMMIT_RECOVER_FINISH;
-    out->corrected_offset = found_offset + found_len;
-    out->corrected_size = actual_key_size;
-    return 0;
-  }
+    size_t seq, off, len;
 
-  if (actual_key_size == declared_size && declared_offset == found_offset + found_len)
+    if (parse_stage_name(entry->d_name, stage_prefix))
+    {
+      out->stale_staging++;
+      continue;
+    }
+    if (!parse_pending_name(entry->d_name, prefix, &seq, &off, &len))
+      continue;
+    if (found)
+    {
+      out->extra_artifacts++;
+      continue;
+    }
+    found_seq = seq;
+    found_offset = off;
+    found_len = len;
+    found = 1;
+  }
+  closedir(d);
+
+  if (!found)
+    return 0;
+
+  out->sequence = found_seq;
+  out->range_offset = found_offset;
+  out->range_length = found_len;
+
+  unsigned long long key_size_64;
+  size_t actual_key_size;
+  if (otp_file_size(key_file_path, &key_size_64) != 0 ||
+      otp_size_to_size_t(key_size_64, &actual_key_size) != 0)
   {
-    /* Window 3: fully committed already - only delivery/cleanup remains. */
-    out->action = COMMIT_RECOVER_DELIVER;
-    return 0;
+    /* Same fail-closed verdict as reconcile: without the key file's size
+     * nothing can be concluded. Quiet here - this is a query primitive,
+     * and the caller owns the reporting. */
+    out->action = COMMIT_RECOVER_BLOCKED;
+    return -1;
   }
 
-  fprintf(stderr,
-          "Warning: pending artifact %s does not match a recognized recovery state "
-          "(declared offset=%zu size=%zu, actual key size=%zu) - discarding without redelivery\n",
-          found_path, declared_offset, declared_size, actual_key_size);
-  unlink(found_path);
-  out->action = COMMIT_RECOVER_ERROR;
+  out->action = classify_window(actual_key_size, declared_offset, declared_size,
+                                found_offset, found_len,
+                                &out->corrected_offset, &out->corrected_size);
   return 0;
 }
 

@@ -41,6 +41,8 @@ build:
 	@bash test/confirm.test.sh
 	@bash test/lastcopy.test.sh
 	@bash test/truncate.test.sh
+	@bash test/status.test.sh
+	@bash test/recoverlast.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -82,6 +84,8 @@ musl:
 	@bash test/confirm.test.sh
 	@bash test/lastcopy.test.sh
 	@bash test/truncate.test.sh
+	@bash test/status.test.sh
+	@bash test/recoverlast.test.sh
 	@echo " - Tested!"
 	@echo
 

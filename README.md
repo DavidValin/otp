@@ -39,6 +39,12 @@ When using the one time pad algorithm, it is critical to remember to never reuse
   - [Per-contact metadata files](#per-contact-metadata-files)
   - [Self-healing metadata](#self-healing-metadata)
   - [Known limitations](#known-limitations)
+- [External Integrations](#external-integrations)
+  - [The four questions an integrated program must answer](#the-four-questions-an-integrated-program-must-answer)
+  - [`--status`: the disk-verified state query](#--status-the-disk-verified-state-query)
+  - [`--recover-last`: re-emitting the kept safety copies](#--recover-last-re-emitting-the-kept-safety-copies)
+  - [The integration flow](#the-integration-flow)
+  - [Why this flow preserves the one-time-pad guarantees](#why-this-flow-preserves-the-one-time-pad-guarantees)
 
 ## Installation
 
@@ -136,6 +142,8 @@ Common operations:
 - **Show contact details:** `otp --show-contact <name>` or `otp -sc <name>`
 - **Remove contact:** `otp --remove-contact <name>` or `otp -rc <name>`
 - **Check if contact exists:** `otp --has-contact <name>` or `otp -hc <name>`
+- **Disk-verified status (for scripts/integrations):** `otp --status <name> [--porcelain]` or `otp -st <name>` - see [External Integrations](#external-integrations)
+- **Re-emit the last payload's kept copy:** `otp --recover-last <name> --sent|--received` or `otp -rl <name> ...`
 
 #### Keychain Features
 
@@ -184,7 +192,7 @@ During an operation, and after an interrupted one, you may also see:
 | `<contact>_<dir>_pending.<pid>.tmp` | transient | Output still being staged. Never verified or published, so it carries no recoverable meaning; swept away by the next operation on that contact and direction. On the decrypt side it holds plaintext. |
 | `<contact>_enc.key.tmp`<br>`<contact>_dec.key.tmp` | transient | The post-truncation key file, staged and verified before being renamed over the real one. |
 | `<contact>.meta.tmp` | transient | The metadata file, staged and verified the same way. |
-| `<contact>.last_sent`<br>`<contact>.last_received` | until next confirmed operation | An exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed. `otp` removes it **automatically** - no manual cleanup is ever needed - the moment the next operation in that direction confirms delivery (interactive "yes" or `-y`); if delivery is instead rejected, `otp` offers to recover the copy to a file of your choosing. Deleted with the contact. |
+| `<contact>.last_sent`<br>`<contact>.last_received` | until next confirmed operation | An exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed. `otp` removes it **automatically** - no manual cleanup is ever needed - the moment the next operation in that direction confirms delivery (interactive "yes" or `-y`); if delivery is instead rejected, `otp` offers to recover the copy to a file of your choosing. `--recover-last` streams it to stdout at any time without consuming it. Deleted with the contact. |
 
 `<dir>` is `enc` or `dec`. Every transient file is either published by an atomic `rename()` or cleaned up; none of them is ever the only copy of anything that matters. Seeing one after a crash is normal - the next `otp -c <contact>` call reconciles it.
 
@@ -523,3 +531,119 @@ Each operation now compares the two before spending any key, and resolves the di
 
 - **Delivery is not byte-resumable:** if a crash interrupts the final delivery step partway through writing to `stdout`, recovery redelivers the message from the beginning. Key state stays exactly correct, but a consumer that already received part of the stream will see those bytes twice. The recovery notice on `stderr` and the distinct exit code (`3`) make this detectable rather than silent.
 - **Deleted staged files are unlinked, not shredded:** pending artifacts and abandoned staging files are removed with `unlink()`. On a journaling or copy-on-write filesystem, or on flash, their contents may remain recoverable from the underlying media afterwards.
+
+## External Integrations
+
+A program that wants to send and receive one-time-pad messages does not need `otp` as a library - the command itself is the API. Encrypt/decrypt are pure stdin→stdout filters with distinct exit codes (`0` processed, `3` redelivered, `1` error), the delivery-confirmation gate is scriptable with `-y`, and two read-only query commands - `--status` and `--recover-last` - expose everything else a driving program must know. The process boundary is not a compromise, it is part of the design: each operation's plaintext and key bytes live in an address space that is gone when the call returns, and the crash-safety model (built around "a run was interrupted") keeps its one-process-per-operation shape.
+
+### The four questions an integrated program must answer
+
+Before its next operation on a contact, an integrated client needs to know, per direction:
+
+1. **Did my last encrypt/decrypt complete?** At operation time the exit code answers this (`0` = staged, CRC-verified on disk, key committed, delivered). After a restart, the same answer is reconstructed from disk by `--status`.
+2. **Will the next operation process my input at all?** If an interrupted run left a *committed* message behind, the next operation redelivers that message (exit `3`) and does **not** read its input. `--status` reports this in advance as `redelivery_pending`.
+3. **Was the last sent message delivered?** `otp` cannot know this - only the correspondents can, out of band. What `otp` tracks is whether it has been *told*: the `.last_sent` copy exists until the next confirmed operation. `--status` reports that as `ack_outstanding`; the client answers it by passing `-y` once the peer acknowledged.
+4. **Was the last received message handed over intact?** Symmetric, via `.last_received` on the decrypt side.
+
+All four answers live in the `.keychain/` files already; the two commands below expose them without the client ever touching keychain internals.
+
+### `--status`: the disk-verified state query
+
+```
+otp --status <contact> [--porcelain]     (or -st)
+```
+
+Reports both directions of one contact, **verified from the disk files themselves** rather than trusting any single record. The key file's physical size is the authority on remaining key (bytes are consumed from the front and the file truncated - exactly the rule the operations themselves use); the `.meta` declarations are cross-checked against it; pending artifacts are classified by the very same truth-table code crash recovery runs (`commit_classify()` shares it with `commit_reconcile()`), so the report can never disagree with what the next operation will actually do.
+
+Porcelain output is stable `key=value` lines:
+
+```
+contact=bob
+enc_sequence=3                  # messages sent so far
+enc_key_remaining=1048218       # physical key file size - the authority
+enc_meta_state=consistent       # consistent | meta_behind | rolled_back
+enc_redelivery_pending=0        # 1: next --encrypt redelivers a recovered message
+enc_ack_outstanding=1           # 1: last sent message awaits delivery confirmation
+dec_sequence=1
+dec_key_remaining=1048476
+dec_meta_state=consistent
+dec_redelivery_pending=0
+dec_ack_outstanding=0
+```
+
+Exit codes (most actionable condition across both directions, most severe first):
+
+| Exit | Meaning |
+|---|---|
+| `0` | Clean and ready in both directions |
+| `4` | Redelivery pending: the next operation in some direction will re-emit a committed message from an interrupted run and will not process its input |
+| `5` | Delivery confirmation outstanding: pass `-y` on the next operation once confirmed, or recover the copy |
+| `6` | Key material rolled back (key file larger than the metadata records): its leading bytes were already spent once - re-key the contact |
+| `1` | Error (unknown contact, unreadable key file) |
+
+`--status` is strictly **read-only**: it never deletes, truncates, renames or heals anything - not even the staging-file sweep or the `meta_behind` self-correction, which stay in the operational paths. The keychain directory is byte-identical before and after (the test suite asserts this), the only files it may create being the ones every command creates on first touch: `.keychain/` itself and the contact's empty `.lock`, which it holds briefly so the snapshot cannot interleave with a live operation.
+
+### `--recover-last`: re-emitting the kept safety copies
+
+```
+otp --recover-last <contact> --sent       (or -rl)   # exact ciphertext of the last encrypt
+otp --recover-last <contact> --received              # exact plaintext of the last decrypt
+```
+
+Streams the kept safety copy to stdout. `--sent` is the client's re-transmission source when the transport lost a message (the same bytes are always valid for the receiver's current key position - **never re-encrypt**); `--received` recovers the plaintext when the client crashed between decrypting and handing the message to its application - the key bytes that produced it are already destroyed, so this copy is the only decryption that will ever exist.
+
+Read-only and idempotent: the copy is **never** deleted by this command - not even after a fully successful stream, because bytes leaving the process are not proof they were persisted or delivered anywhere. The one deletion path is unchanged: the next operation in that direction removes the copy when the operator (or the client, via `-y`) confirms delivery. Exit codes: `0` copy streamed, `2` no copy exists (nothing awaits confirmation - usable as a cheap existence probe), `1` error.
+
+### The integration flow
+
+The client owns two things `otp` by design cannot: the transport ack (any application-level "got message N intact" reply from the peer) and the decision to pass `-y`, which that ack licenses. Everything else comes from disk:
+
+```
+                         SENDER (per contact)
+┌─────────────────────────────────────────────────────────────────┐
+│ otp --status bob --porcelain                                     │
+│   exit 4 (enc_redelivery_pending=1)?                             │
+│     → otp -c bob --encrypt < /dev/null > out.bin      (exit 3)   │
+│       transmit out.bin, wait for ack       ── interrupted run's  │
+│                                               message; its key   │
+│                                               is already spent   │
+│   exit 5 (enc_ack_outstanding=1)?                                │
+│     → wait for the ack; if the transport lost the message:       │
+│       otp --recover-last bob --sent > out.bin                    │
+│       re-transmit the SAME bytes (never re-encrypt), wait ack    │
+│   exit 0 (clean, or ack now in hand)?                            │
+│     → otp -c bob --encrypt -y < plain > out.bin                  │
+│       exit 0: transmit; keep a copy until acked                  │
+│       exit 1: nothing was spent - safe to retry                  │
+└─────────────────────────────────────────────────────────────────┘
+
+                        RECEIVER (per contact)
+┌─────────────────────────────────────────────────────────────────┐
+│ on ciphertext arrival: otp --status alice --porcelain            │
+│   exit 4 (dec_redelivery_pending=1)?                             │
+│     → otp -c alice --decrypt < /dev/null > in.txt     (exit 3)   │
+│       deliver to the app, send ack; then continue below          │
+│   exit 5 (dec_ack_outstanding=1)?                                │
+│     → otp --recover-last alice --received > in.txt               │
+│       deliver to the app, send ack  ── client died between       │
+│                                        decrypt and delivery;     │
+│                                        this copy is the only     │
+│                                        plaintext left            │
+│   then: otp -c alice --decrypt -y < cipher.bin > in.txt          │
+│       exit 0: deliver to the app, send ack                       │
+│       exit 1: out-of-order/duplicate - key NOT spent; hold it    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The steady-state happy path collapses to `--status` (exit `0`) → operation with `-y` → transmit/deliver → ack. The other branches are the recovery ladder, each answerable from the status fields alone - so the client needs **no persistent state of its own** beyond its un-acked ciphertext copies, and even losing those is covered by `--recover-last --sent`.
+
+### Why this flow preserves the one-time-pad guarantees
+
+Requirement 2 of the pad - every key byte used exactly once, ever ([One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)) - and its transport corollary - each direction's messages decrypted in order, complete, exactly once - survive this flow untouched, for four reasons:
+
+- **The query commands cannot spend or expose key.** Neither reads a single byte of key material; they read sizes, names and the kept payload copies. Every guard in the write paths - staging, CRC read-back verification, atomic publish, key-file-before-metadata ordering, the reconciliation truth table, the per-contact `flock()`, the fail-closed confirmation gate - runs unchanged, because that code is not modified, only queried.
+- **Re-transmission never re-encrypts.** A lost message is re-sent from the stored ciphertext (the client's copy or `--recover-last --sent`), so no second key range is ever spent on the same plaintext, and the receiver's key position stays aligned whether the original or the retry arrives.
+- **Redelivery is surfaced before it happens.** Exit `3` already prevented a script from mistaking a recovered message for its own; `redelivery_pending` lets the client know *in advance* that its input will not be processed, so it sequences the recovered message first and its new message second - preserving in-order, exactly-once within the direction.
+- **The confirmation gate keeps its meaning.** `-y` remains an assertion the *client* makes from its own ack state, exactly as the interactive "yes" is the operator's. `--status` merely tells the client that the assertion is due (`ack_outstanding=1`); it never makes it. A client that follows the flow - ack before `-y`, `-y` before new key is spent - gives the gate strictly better information than an interactive user guessing from memory.
+
+And the crash-safety picture is provably unchanged: `--status` and `--recover-last` are asserted read-only by the test suite (byte-identical keychain before and after, pending artifacts left untouched), the classification they report is the same code recovery executes, and every pre-existing crash-window, locking, metadata and confirmation test passes unmodified.
