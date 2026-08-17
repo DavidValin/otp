@@ -84,6 +84,28 @@ mingw:
 	@echo " - Built bin/otp.exe!"
 	@echo
 
+# Cross-compile Linux ARM binaries with the GNU cross toolchains
+# (gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf). The test suite cannot
+# run here (the binary targets another architecture); on an ARM host,
+# plain `make build` compiles natively and runs the full suite instead.
+# _FILE_OFFSET_BITS=64 matters most on arm32, where off_t is 32-bit by
+# default and keys over 2GB would fail without it.
+arm64:
+	@echo
+	@echo " - Cross-compiling Linux arm64 binary..."
+	@mkdir -p bin
+	@aarch64-linux-gnu-gcc -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@echo " - Built bin/otp (arm64)!"
+	@echo
+
+arm32:
+	@echo
+	@echo " - Cross-compiling Linux arm32 (hard-float) binary..."
+	@mkdir -p bin
+	@arm-linux-gnueabihf-gcc -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@echo " - Built bin/otp (arm32)!"
+	@echo
+
 install-musl:
 	@echo
 	@echo " - Installing musl binary..."
