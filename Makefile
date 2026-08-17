@@ -18,6 +18,10 @@ endif
 
 BIN := bin/otp$(BIN_EXT)
 
+# `test` must be phony: a directory named test/ exists, so without this
+# make would consider the target permanently up to date and do nothing.
+.PHONY: test
+
 build:
 	@echo
 	@echo " - Building..."
@@ -39,6 +43,13 @@ build:
 	@bash test/truncate.test.sh
 	@echo " - Tested!"
 	@echo
+
+# Run the full test suite via test/report.sh, which executes every test
+# script (continuing past failures so the report is complete) and renders
+# test-report.html - colored, expandable per-test results with output and
+# source - in the current directory. Exits non-zero if any script failed.
+test:
+	@sh test/report.sh
 
 install:
 	@echo
