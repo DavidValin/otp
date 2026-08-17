@@ -353,6 +353,7 @@ rm -rf .keychain
 echo "     Cleaning up test files..."
 
 rm -rf .keychain
+rm -f lock_*
 
 echo ""
 exit 0

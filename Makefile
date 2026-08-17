@@ -35,6 +35,7 @@ build:
 	@bash test/lock.test.sh
 	@bash test/metadata.test.sh
 	@bash test/confirm.test.sh
+	@bash test/truncate.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -67,6 +68,7 @@ musl:
 	@bash test/lock.test.sh
 	@bash test/metadata.test.sh
 	@bash test/confirm.test.sh
+	@bash test/truncate.test.sh
 	@echo " - Tested!"
 	@echo
 

@@ -170,6 +170,7 @@ rm -f meta_bigkey.txt meta_bigmsg.bin meta_bigcipher.bin
 echo "     Cleaning up test files..."
 
 rm -rf .keychain
+rm -f meta_*
 
 echo ""
 exit 0
