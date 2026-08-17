@@ -33,6 +33,7 @@
 #endif
 
 #include "keychain.h"
+#include "cipher.h"
 #include "platform.h"
 
 #ifndef _WIN32

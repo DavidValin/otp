@@ -23,9 +23,9 @@ build:
 	@echo " - Building..."
 	@mkdir -p bin
 	@if [ "$(OS)" = "Windows_NT" ]; then \
-		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c src/keychain.c src/commit.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) /Fe:$(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c || exit 1; \
 	else \
-		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c src/keychain.c src/commit.c || exit 1; \
+		$(CC) $(BUILD_FLAGS) -o $(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c || exit 1; \
 	fi
 	@echo " - Built!"
 	@echo " - Testing..."
@@ -60,7 +60,7 @@ musl:
 	@echo
 	@echo " - Building musl static binary..."
 	@mkdir -p bin
-	@musl-gcc -static -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@musl-gcc -static -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built!"
 	@echo " - Testing..."
 	@bash test/otp.test.sh
@@ -82,7 +82,7 @@ mingw:
 	@echo
 	@echo " - Cross-compiling Windows binary with MinGW-w64..."
 	@mkdir -p bin
-	@x86_64-w64-mingw32-gcc -Wall -Wextra -O2 -o bin/otp.exe src/otp.c src/keychain.c src/commit.c
+	@x86_64-w64-mingw32-gcc -Wall -Wextra -O2 -o bin/otp.exe src/otp.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built bin/otp.exe!"
 	@echo
 
@@ -102,7 +102,7 @@ arm64:
 	@echo
 	@echo " - Cross-compiling Linux arm64 binary..."
 	@mkdir -p bin
-	@aarch64-linux-gnu-gcc -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@aarch64-linux-gnu-gcc -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built bin/otp (arm64)!"
 	@echo
 
@@ -110,7 +110,7 @@ arm32:
 	@echo
 	@echo " - Cross-compiling Linux arm32 (hard-float) static binary..."
 	@mkdir -p bin
-	@arm-linux-gnueabihf-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@arm-linux-gnueabihf-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built bin/otp (arm32)!"
 	@echo
 
@@ -118,7 +118,7 @@ riscv64:
 	@echo
 	@echo " - Cross-compiling Linux riscv64 static binary..."
 	@mkdir -p bin
-	@riscv64-linux-gnu-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@riscv64-linux-gnu-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built bin/otp (riscv64)!"
 	@echo
 
