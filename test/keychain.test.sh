@@ -857,7 +857,13 @@ fi
 
 echo "     Testing that a failed key comparison refuses rather than accepts..."
 
-OTP_TEST_FAIL_KEY_COMPARE=1 ./bin/otp --add-contact failclosed kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_failcmp.log
+# This section needs its own pads: kc_dupkey/kc_otherkey are now installed
+# for 'distinctkeys', and supplying an already-installed pad to a second
+# contact is itself refused (see the cross-contact reuse section below).
+dd if=/dev/urandom of=kc_fckey1.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_fckey2.txt bs=1 count=500 2>/dev/null
+
+OTP_TEST_FAIL_KEY_COMPARE=1 ./bin/otp --add-contact failclosed kc_fckey1.txt kc_fckey2.txt > /dev/null 2>kc_failcmp.log
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^failclosed")
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
@@ -876,7 +882,7 @@ else
   exit 1
 fi
 
-./bin/otp --add-contact failclosed kc_dupkey.txt kc_otherkey.txt > /dev/null 2>&1
+./bin/otp --add-contact failclosed kc_fckey1.txt kc_fckey2.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
   echo "     - PASS - the same pair is accepted once the comparison can run"
 else
@@ -884,7 +890,7 @@ else
   exit 1
 fi
 ./bin/otp --remove-contact failclosed > /dev/null 2>&1
-rm -f kc_failcmp.log
+rm -f kc_failcmp.log kc_fckey1.txt kc_fckey2.txt
 
 # -----------------------------------------------------------------------------
 #  re-using a contact name must warn about already-spent key material
@@ -899,7 +905,13 @@ echo "     Testing the warning when a contact name is re-used..."
 printf 'consume a little' | ./bin/otp -c distinctkeys --encrypt > /dev/null 2>&1
 ./bin/otp --remove-contact distinctkeys > /dev/null 2>&1
 
-./bin/otp --add-contact distinctkeys kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_reuse.log
+# Rotating a re-used name onto genuinely fresh keys is the legitimate case
+# the warning exists to permit. Re-supplying the spent ORIGINAL is no longer
+# merely warned about - the spent-key registry refuses it outright (tested
+# in its own section below) - so the rotation here uses new pads.
+dd if=/dev/urandom of=kc_rotkey1.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_rotkey2.txt bs=1 count=500 2>/dev/null
+./bin/otp --add-contact distinctkeys kc_rotkey1.txt kc_rotkey2.txt > /dev/null 2>kc_reuse.log
 RC=$?
 grep -q "has been used on this keychain before" kc_reuse.log
 G=$?
@@ -919,8 +931,12 @@ else
   exit 1
 fi
 
-# A name never used before must stay silent
-./bin/otp --add-contact neverseen kc_dupkey.txt kc_otherkey.txt > /dev/null 2>kc_quiet.log
+# A name never used before must stay silent. Its keys must be fresh ones:
+# any key-material overlap with installed or spent pads would (rightly)
+# produce output of its own and hide what this test measures.
+dd if=/dev/urandom of=kc_quietkey1.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_quietkey2.txt bs=1 count=500 2>/dev/null
+./bin/otp --add-contact neverseen kc_quietkey1.txt kc_quietkey2.txt > /dev/null 2>kc_quiet.log
 if [ ! -s kc_quiet.log ]; then
   echo "     - PASS - a fresh contact name produces no warning"
 else
@@ -932,6 +948,250 @@ fi
 ./bin/otp --remove-contact distinctkeys > /dev/null 2>&1
 ./bin/otp --remove-contact neverseen > /dev/null 2>&1
 rm -f kc_dupkey.txt kc_dupcopy.txt kc_otherkey.txt kc_dup1.log kc_dup2.log kc_reuse.log kc_quiet.log
+rm -f kc_rotkey1.txt kc_rotkey2.txt kc_quietkey1.txt kc_quietkey2.txt
+
+# -----------------------------------------------------------------------------
+#  overlap hidden inside a key must be detected (interior overlap)
+#
+#  A pad trimmed at both ends, or two windows cut from the same pad, share
+#  key material without either file being a prefix or suffix of the other.
+#  Alignment-only comparison passes such pairs as distinct; the overlap
+#  check must instead find either file's opening bytes wherever they sit
+#  inside the other.
+# -----------------------------------------------------------------------------
+
+echo "     Testing detection of overlap hidden inside a key (interior overlap)..."
+
+dd if=/dev/urandom of=kc_bigpad.txt bs=1024 count=300 2>/dev/null
+# A slice cut from the middle: neither the front nor the tail of the pad
+dd if=kc_bigpad.txt of=kc_midslice.txt bs=1024 skip=100 count=100 2>/dev/null
+
+./bin/otp --add-contact interiortest kc_bigpad.txt kc_midslice.txt > /dev/null 2>kc_interior.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^interiortest")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - a slice cut from the middle of a pad is rejected against that pad"
+else
+  echo "     ! FAIL - an interior slice of the same pad was accepted (exit $RC)"
+  exit 1
+fi
+
+grep -q "appears inside" kc_interior.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the refusal identifies the overlap even though neither end lines up"
+else
+  echo "     ! FAIL - interior overlap not identified as such"
+  cat kc_interior.log
+  exit 1
+fi
+
+# Two windows sharing only a middle stretch: winA is bytes 0-200K, winB is
+# bytes 100K-300K. Neither contains the other and no aligned prefix/suffix
+# matches, yet 100K of pad is common to both.
+dd if=kc_bigpad.txt of=kc_winA.txt bs=1024 count=200 2>/dev/null
+dd if=kc_bigpad.txt of=kc_winB.txt bs=1024 skip=100 count=200 2>/dev/null
+
+./bin/otp --add-contact interiortest kc_winA.txt kc_winB.txt > /dev/null 2>&1
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^interiortest")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - two windows sharing only a middle stretch are rejected"
+else
+  echo "     ! FAIL - two overlapping windows of one pad were accepted (exit $RC)"
+  exit 1
+fi
+
+# Control: two genuinely independent pads of the same sizes still pass
+dd if=/dev/urandom of=kc_indep1.txt bs=1024 count=300 2>/dev/null
+dd if=/dev/urandom of=kc_indep2.txt bs=1024 count=100 2>/dev/null
+./bin/otp --add-contact interiortest kc_indep1.txt kc_indep2.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - two genuinely independent pads are still accepted"
+else
+  echo "     ! FAIL - independent pads were refused by the interior check"
+  exit 1
+fi
+./bin/otp --remove-contact interiortest > /dev/null 2>&1
+rm -f kc_bigpad.txt kc_midslice.txt kc_winA.txt kc_winB.txt kc_indep1.txt kc_indep2.txt kc_interior.log
+
+# -----------------------------------------------------------------------------
+#  key material installed for one contact must not be accepted for another
+#
+#  The same pad under two contacts is consumed twice from its own start -
+#  two different messages covered by the same bytes. The one legitimate
+#  shape is the mirrored pair (new enc = existing dec and vice versa),
+#  which is how one machine operates both endpoints of its own pads for
+#  loopback testing; that is allowed but warned about.
+# -----------------------------------------------------------------------------
+
+echo "     Testing that key material installed for another contact is rejected..."
+
+dd if=/dev/urandom of=kc_ccA.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_ccB.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_ccC.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_ccD.txt bs=1 count=500 2>/dev/null
+
+./bin/otp --add-contact ccfirst kc_ccA.txt kc_ccB.txt > /dev/null 2>&1
+
+./bin/otp --add-contact ccsecond kc_ccA.txt kc_ccC.txt > /dev/null 2>kc_cc1.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - a pad already serving as another contact's encryption key is rejected"
+else
+  echo "     ! FAIL - the same pad was installed for two contacts (exit $RC)"
+  exit 1
+fi
+
+grep -q "contact 'ccfirst'" kc_cc1.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the refusal names the contact already holding that pad"
+else
+  echo "     ! FAIL - refusal does not say which contact holds the pad"
+  cat kc_cc1.log
+  exit 1
+fi
+
+./bin/otp --add-contact ccsecond kc_ccC.txt kc_ccB.txt > /dev/null 2>&1
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - the decryption direction is checked too"
+else
+  echo "     ! FAIL - a shared decryption pad was accepted (exit $RC)"
+  exit 1
+fi
+
+# The tail of an installed pad is what a ".next" file or a partially
+# consumed key looks like - handing it to a second contact is the same
+# overlap and must be caught across contacts, not only within one pair.
+dd if=kc_ccA.txt of=kc_ccA_tail.txt bs=1 skip=100 2>/dev/null
+./bin/otp --add-contact ccsecond kc_ccA_tail.txt kc_ccC.txt > /dev/null 2>&1
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - a remainder of an installed pad is rejected across contacts too"
+else
+  echo "     ! FAIL - a tail of an installed pad was accepted for another contact (exit $RC)"
+  exit 1
+fi
+
+# The mirrored pair is the other endpoint of the same pads: allowed, since
+# that is how loopback testing in one directory works, but warned about.
+./bin/otp --add-contact ccmirror kc_ccB.txt kc_ccA.txt > /dev/null 2>kc_ccmirror.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the mirrored pair of an existing contact is allowed for loopback use"
+else
+  echo "     ! FAIL - the mirrored (other-endpoint) pair was refused"
+  cat kc_ccmirror.log
+  exit 1
+fi
+
+grep -q "other endpoint" kc_ccmirror.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the mirror add warns that it looks like the pad's other endpoint"
+else
+  echo "     ! FAIL - no other-endpoint warning for the mirrored pair"
+  cat kc_ccmirror.log
+  exit 1
+fi
+
+# Genuinely fresh keys must still be accepted while the others are installed
+./bin/otp --add-contact ccsecond kc_ccC.txt kc_ccD.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - unrelated key material is still accepted alongside them"
+else
+  echo "     ! FAIL - unrelated keys were refused by the cross-contact check"
+  exit 1
+fi
+
+./bin/otp --remove-contact ccfirst > /dev/null 2>&1
+./bin/otp --remove-contact ccmirror > /dev/null 2>&1
+./bin/otp --remove-contact ccsecond > /dev/null 2>&1
+rm -f kc_ccA.txt kc_ccB.txt kc_ccC.txt kc_ccD.txt kc_ccA_tail.txt kc_cc1.log kc_ccmirror.log
+
+# -----------------------------------------------------------------------------
+#  a removed contact's spent original must not come back under a new name
+#
+#  Removing a contact deletes its key files, so a later add has nothing to
+#  compare against - re-supplying the ORIGINAL file from key generation
+#  would restart at offset 0 over bytes that already encrypted messages.
+#  The spent-heads registry closes this: the first time a key's opening
+#  bytes are consumed, their fingerprint is recorded durably, and any
+#  later candidate containing those bytes is recognized whatever the
+#  contact is now called. The partially consumed remainder (which no
+#  longer contains the spent head) must remain acceptable - it is exactly
+#  what a user SHOULD carry over.
+# -----------------------------------------------------------------------------
+
+echo "     Testing that a removed contact's spent original is refused under a new name..."
+
+dd if=/dev/urandom of=kc_spentkey.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=kc_spentdec.txt bs=1 count=500 2>/dev/null
+./bin/otp --add-contact spentowner kc_spentkey.txt kc_spentdec.txt > /dev/null 2>&1
+
+# Recording the fingerprint must fail closed: if it cannot be written, the
+# operation aborts before any key material is spent.
+printf 'x' | OTP_TEST_FAIL_SPENT_RECORD=1 ./bin/otp -c spentowner --encrypt > /dev/null 2>&1
+RC=$?
+OFFSET=$(./bin/otp --show-contact spentowner | grep "EncryptionKeyOffset:" | awk '{print $2}')
+if [ $RC -ne 0 ] && [ "$OFFSET" = "0" ]; then
+  echo "     - PASS - a failed fingerprint record aborts before any key is spent"
+else
+  echo "     ! FAIL - key was spent although its fingerprint could not be recorded (exit $RC, offset $OFFSET)"
+  exit 1
+fi
+
+# Spend the first 14 bytes of the pad for real, then remove the contact
+printf 'spend this pad' | ./bin/otp -c spentowner --encrypt > /dev/null 2>&1
+./bin/otp --remove-contact spentowner > /dev/null 2>&1
+
+# The original file still exists outside the keychain. Under a brand-new
+# name nothing else ties it to the removed contact - only the registry can.
+dd if=/dev/urandom of=kc_freshdec.txt bs=1 count=500 2>/dev/null
+./bin/otp --add-contact freshname kc_spentkey.txt kc_freshdec.txt > /dev/null 2>kc_spent.log
+RC=$?
+CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^freshname")
+if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
+  echo "     - PASS - the spent original is rejected even under a fresh contact name"
+else
+  echo "     ! FAIL - a spent original key was re-installed under a new name (exit $RC)"
+  exit 1
+fi
+
+grep -q "already spent" kc_spent.log
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the refusal explains that the key material was already spent here"
+else
+  echo "     ! FAIL - refusal does not explain the spent-key hazard"
+  cat kc_spent.log
+  exit 1
+fi
+
+# The remainder - the original minus its 14 consumed bytes - is the safe
+# carry-over and must still be accepted.
+dd if=kc_spentkey.txt of=kc_spentremainder.txt bs=1 skip=14 2>/dev/null
+./bin/otp --add-contact freshname kc_spentremainder.txt kc_freshdec.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - the partially consumed remainder is still accepted"
+else
+  echo "     ! FAIL - the legitimate remainder was refused"
+  exit 1
+fi
+./bin/otp --remove-contact freshname > /dev/null 2>&1
+
+# The removed contact's OTHER key was never consumed - re-using it is safe
+# and must not be blocked by the registry.
+dd if=/dev/urandom of=kc_newenc.txt bs=1 count=500 2>/dev/null
+./bin/otp --add-contact unspentreuse kc_newenc.txt kc_spentdec.txt > /dev/null 2>&1
+if [ $? -eq 0 ]; then
+  echo "     - PASS - a never-consumed key from the removed contact is still accepted"
+else
+  echo "     ! FAIL - an unspent key was refused as if it had been consumed"
+  exit 1
+fi
+./bin/otp --remove-contact unspentreuse > /dev/null 2>&1
+rm -f kc_spentkey.txt kc_spentdec.txt kc_freshdec.txt kc_spentremainder.txt kc_newenc.txt kc_spent.log
 
 # -----------------------------------------------------------------------------
 #  cleanup

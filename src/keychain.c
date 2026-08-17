@@ -17,6 +17,7 @@
 #include "platform.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
@@ -169,13 +170,25 @@ static int copy_key_file(const char *src_path, const char *dst_path)
 // twice, and the sizes differ precisely because some of it was already
 // spent. A truncated head of a pad is the mirror image of that case.
 //
-// Both alignments are therefore compared over the whole of the shorter
-// file: the two fronts against each other (prefix), and the two tails
-// against each other (suffix). Comparison stops at the first differing
-// byte, so two genuinely independent pads cost about one chunk of I/O no
-// matter how large they are - it is only actually-overlapping files that
-// are read to the end.
+// Nor is overlap confined to those two alignments: a pad trimmed at both
+// ends, or two windows cut from the same pad, share key material without
+// either file being a prefix or suffix of the other. Detection therefore
+// searches for each file's opening KEY_ANCHOR_LEN bytes at *every* offset
+// of the other file, with a rolling hash so the search is one sequential
+// read of each file. Any overlap that includes either file's first
+// KEY_ANCHOR_LEN bytes is found this way; only an overlap that excludes
+// both files' heads (which no artifact of this tool produces - every
+// truncation and every ".next" file preserves one end) or one shorter
+// than the anchor can escape. Files smaller than the anchor keep the two
+// aligned comparisons only: a handful of bytes genuinely can coincide in
+// two independent pads, and refusing on such a coincidence would reject
+// legitimate keys.
+//
+// The cost is a full read of both files rather than the early-exit a
+// front-only comparison would allow. Adding a contact is rare and this is
+// the one moment overlap is detectable at all, so the trade is taken.
 #define KEY_COMPARE_CHUNK (1024 * 1024)
+#define KEY_ANCHOR_LEN 64
 
 typedef enum
 {
@@ -183,8 +196,136 @@ typedef enum
   KEY_OVERLAP_IDENTICAL, // same size, same bytes
   KEY_OVERLAP_PREFIX,    // the shorter file is the head of the longer
   KEY_OVERLAP_SUFFIX,    // the shorter file is the tail of the longer
+  KEY_OVERLAP_INTERIOR,  // shared material at an unaligned, interior offset
   KEY_OVERLAP_UNKNOWN    // comparison could not be carried out at all
 } KeyOverlap;
+
+// Polynomial rolling hash over a KEY_ANCHOR_LEN-byte window, modulo 2^64
+// via unsigned wraparound. Not cryptographic and does not need to be: a
+// collision only costs a byte comparison (or, for the spent-heads
+// registry, a second, structurally different digest check).
+#define KEY_HASH_BASE 1099511628211ULL
+
+static uint64_t anchor_hash(const unsigned char *buf, size_t len)
+{
+  uint64_t h = 0;
+  for (size_t i = 0; i < len; i++)
+    h = h * KEY_HASH_BASE + buf[i];
+  return h;
+}
+
+// FNV-1a: the independent second digest used to confirm a rolling-hash
+// hit where the original bytes are no longer available to compare
+// against (the spent-heads registry stores digests, never key bytes).
+static uint64_t confirm_hash(const unsigned char *buf, size_t len)
+{
+  uint64_t h = 14695981039346656037ULL;
+  for (size_t i = 0; i < len; i++)
+  {
+    h ^= buf[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+// The weight the oldest byte of the window carries in the rolling hash,
+// KEY_HASH_BASE^(KEY_ANCHOR_LEN-1) mod 2^64.
+static uint64_t rolling_out_weight(void)
+{
+  uint64_t w = 1;
+  for (int i = 0; i < KEY_ANCHOR_LEN - 1; i++)
+    w *= KEY_HASH_BASE;
+  return w;
+}
+
+// Search `hay_path` (of size `hay_size`) for the first KEY_ANCHOR_LEN
+// bytes of `needle_path`. Returns 1 and sets *found_at to the byte offset
+// of the first match, 0 when absent, -1 when the search could not be
+// carried out - which, exactly like file_ranges_equal()'s -1, must stay
+// distinct from "absent": a failed search proves nothing about the files.
+static int find_head_in_file(const char *needle_path,
+                             const char *hay_path, size_t hay_size,
+                             size_t *found_at)
+{
+  // Same fault injection as file_ranges_equal(): the whole overlap check
+  // must fail closed together.
+  if (getenv("OTP_TEST_FAIL_KEY_COMPARE"))
+    return -1;
+  if (hay_size < KEY_ANCHOR_LEN)
+    return 0;
+
+  unsigned char anchor[KEY_ANCHOR_LEN];
+  FILE *nf = fopen(needle_path, "rb");
+  if (!nf)
+    return -1;
+  size_t got = fread(anchor, 1, KEY_ANCHOR_LEN, nf);
+  fclose(nf);
+  if (got != KEY_ANCHOR_LEN)
+    return -1; // callers only search for heads they know are this long
+
+  uint64_t target = anchor_hash(anchor, KEY_ANCHOR_LEN);
+  uint64_t out_weight = rolling_out_weight();
+
+  FILE *hf = fopen(hay_path, "rb");
+  unsigned char *buf = malloc(KEY_COMPARE_CHUNK);
+  if (!hf || !buf)
+  {
+    free(buf);
+    if (hf)
+      fclose(hf);
+    return -1;
+  }
+
+  // Circular window of the last KEY_ANCHOR_LEN bytes; the byte at
+  // absolute position p lives at index p % KEY_ANCHOR_LEN.
+  unsigned char window[KEY_ANCHOR_LEN];
+  uint64_t h = 0;
+  size_t pos = 0;
+  int result = 0;
+
+  size_t n;
+  while (result == 0 && (n = fread(buf, 1, KEY_COMPARE_CHUNK, hf)) > 0)
+  {
+    for (size_t i = 0; i < n; i++)
+    {
+      unsigned char c = buf[i];
+      if (pos >= KEY_ANCHOR_LEN)
+        h = (h - (uint64_t)window[pos % KEY_ANCHOR_LEN] * out_weight) * KEY_HASH_BASE + c;
+      else
+        h = h * KEY_HASH_BASE + c;
+      window[pos % KEY_ANCHOR_LEN] = c;
+      pos++;
+      if (pos >= KEY_ANCHOR_LEN && h == target)
+      {
+        size_t start = pos - KEY_ANCHOR_LEN;
+        int match = 1;
+        for (int j = 0; j < KEY_ANCHOR_LEN; j++)
+        {
+          if (window[(start + j) % KEY_ANCHOR_LEN] != anchor[j])
+          {
+            match = 0;
+            break;
+          }
+        }
+        if (match)
+        {
+          *found_at = start;
+          result = 1;
+          break;
+        }
+      }
+    }
+  }
+
+  // stat said hay_size bytes exist; reading fewer without an error flag
+  // still means the file changed underfoot or the read silently failed.
+  if (result == 0 && (ferror(hf) || pos != hay_size))
+    result = -1;
+
+  free(buf);
+  fclose(hf);
+  return result;
+}
 
 // Compare `length` bytes of two files, each starting at its own offset.
 // Returns 1 if every byte matches, 0 if any byte differs, and -1 if the
@@ -249,26 +390,309 @@ static KeyOverlap key_files_overlap(const char *path_a, const char *path_b,
   if (shorter == 0)
     return KEY_OVERLAP_NONE;
 
-  // Fronts aligned. With equal sizes this is a whole-file comparison and
-  // settles the identical case outright.
-  int front = file_ranges_equal(path_a, 0, path_b, 0, shorter);
-  if (front < 0)
-    return KEY_OVERLAP_UNKNOWN;
-  if (front)
-    return (size_a == size_b) ? KEY_OVERLAP_IDENTICAL : KEY_OVERLAP_PREFIX;
+  // Files smaller than one anchor: aligned comparisons only (see the
+  // block comment above KEY_COMPARE_CHUNK for why an interior search on
+  // so few bytes would produce false refusals).
+  if (shorter < KEY_ANCHOR_LEN)
+  {
+    int front = file_ranges_equal(path_a, 0, path_b, 0, shorter);
+    if (front < 0)
+      return KEY_OVERLAP_UNKNOWN;
+    if (front)
+      return (size_a == size_b) ? KEY_OVERLAP_IDENTICAL : KEY_OVERLAP_PREFIX;
+    if (size_a == size_b)
+      return KEY_OVERLAP_NONE;
+    int tail = file_ranges_equal(path_a, size_a - shorter, path_b, size_b - shorter, shorter);
+    if (tail < 0)
+      return KEY_OVERLAP_UNKNOWN;
+    return tail ? KEY_OVERLAP_SUFFIX : KEY_OVERLAP_NONE;
+  }
 
-  if (size_a == size_b)
-    return KEY_OVERLAP_NONE;
+  // Search for each file's opening anchor anywhere in the other. This
+  // covers the aligned cases (a prefix match sits at offset 0, a suffix
+  // match at the end) and every interior or partially-shifted overlap
+  // that includes either file's head.
+  for (int swapped = 0; swapped < 2; swapped++)
+  {
+    const char *needle = swapped ? path_b : path_a;
+    const char *hay = swapped ? path_a : path_b;
+    size_t needle_size = swapped ? size_b : size_a;
+    size_t hay_size = swapped ? size_a : size_b;
 
-  // Tails aligned: the shorter file against the last `shorter` bytes of
-  // the longer one. This is the ".next"/partially-consumed-key case.
-  int tail = file_ranges_equal(path_a, size_a - shorter, path_b, size_b - shorter, shorter);
-  if (tail < 0)
-    return KEY_OVERLAP_UNKNOWN;
-  if (tail)
-    return KEY_OVERLAP_SUFFIX;
+    size_t at = 0;
+    int found = find_head_in_file(needle, hay, hay_size, &at);
+    if (found < 0)
+      return KEY_OVERLAP_UNKNOWN;
+    if (!found)
+      continue;
+
+    // The anchor match alone is already KEY_ANCHOR_LEN bytes of shared
+    // pad. The full-extent comparison below only refines *how* the files
+    // overlap for the caller's message; if the bytes past the anchor
+    // diverge the pair still shares key material and is still refused,
+    // just reported as interior overlap.
+    size_t extent = hay_size - at;
+    if (extent > needle_size)
+      extent = needle_size;
+    int whole = file_ranges_equal(needle, 0, hay, at, extent);
+    if (whole < 0)
+      return KEY_OVERLAP_UNKNOWN;
+    if (whole != 1)
+      return KEY_OVERLAP_INTERIOR;
+    if (at == 0)
+      return (size_a == size_b) ? KEY_OVERLAP_IDENTICAL : KEY_OVERLAP_PREFIX;
+    if (at + needle_size == hay_size)
+      return KEY_OVERLAP_SUFFIX;
+    return KEY_OVERLAP_INTERIOR;
+  }
 
   return KEY_OVERLAP_NONE;
+}
+
+// ---------------------------------------------------------------------------
+// The spent-heads registry: <keychain_dir>/spent_heads
+//
+// Removing a contact deletes its key files, so nothing remains for the
+// overlap check above to compare a later candidate against - which is
+// exactly how a partially spent ORIGINAL key file could come back under a
+// brand-new contact name and restart at offset 0 over bytes that already
+// encrypted messages. The registry closes that hole: the first time a
+// key's opening bytes are about to be consumed, two 64-bit digests of its
+// first KEY_ANCHOR_LEN bytes are appended here, and every future add
+// scans its candidate files for any registered head at any offset. The
+// original always contains its own spent head, so it is recognized no
+// matter what the contact is now called; the legitimately reusable
+// remainder no longer contains it, so it still passes.
+//
+// Only digests are stored, never key bytes. This is still a deliberate,
+// documented trade-off rather than a free lunch: a digest of spent pad
+// bytes is a confirmation oracle - someone who reads this file AND holds
+// a captured ciphertext can *verify a complete guess* of that message's
+// first KEY_ANCHOR_LEN plaintext bytes. It recovers nothing by itself,
+// and anyone able to read .keychain/ already holds every live key in it,
+// which is strictly worse. The alternative - no durable trace - is the
+// silent two-time pad this registry exists to prevent.
+//
+// Entries are one line each, "v1 <enc|dec> <rolling-hash> <confirm-hash>",
+// appended and fsynced. The direction matters when a match is judged: a
+// candidate DECRYPTION key containing an ENC-spent head is the mirrored
+// other-endpoint pattern (it will decrypt exactly the messages those
+// bytes already encrypted) and is only warned about; every other pairing
+// means the same pad would cover two different messages and is refused.
+// ---------------------------------------------------------------------------
+
+typedef struct
+{
+  char direction[4]; // "enc" or "dec"
+  uint64_t roll;
+  uint64_t confirm;
+} SpentHead;
+
+static void spent_heads_path(const char *keychain_dir, char *path, size_t path_size)
+{
+  snprintf(path, path_size, "%s%cspent_heads", keychain_dir, PATH_SEPARATOR);
+}
+
+// Load every well-formed entry. A missing file is an empty registry. A
+// malformed line (a torn append from a crash) is skipped rather than
+// fatal: the entry it would have held was never durably recorded, and
+// treating it as fatal would refuse every future add forever.
+static int spent_heads_load(const char *keychain_dir, SpentHead **out, size_t *count)
+{
+  *out = NULL;
+  *count = 0;
+
+  char path[600];
+  spent_heads_path(keychain_dir, path, sizeof(path));
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return (errno == ENOENT) ? 0 : -1;
+
+  SpentHead *heads = NULL;
+  size_t n = 0, cap = 0;
+  char line[128];
+  while (fgets(line, sizeof(line), f))
+  {
+    SpentHead h;
+    unsigned long long roll, confirm;
+    if (sscanf(line, "v1 %3s %llx %llx", h.direction, &roll, &confirm) != 3 ||
+        (strcmp(h.direction, "enc") != 0 && strcmp(h.direction, "dec") != 0))
+      continue;
+    h.roll = roll;
+    h.confirm = confirm;
+    if (n == cap)
+    {
+      size_t new_cap = cap ? cap * 2 : 16;
+      SpentHead *nh = realloc(heads, new_cap * sizeof(*nh));
+      if (!nh)
+      {
+        free(heads);
+        fclose(f);
+        return -1;
+      }
+      heads = nh;
+      cap = new_cap;
+    }
+    heads[n++] = h;
+  }
+
+  int bad = ferror(f);
+  fclose(f);
+  if (bad)
+  {
+    free(heads);
+    return -1;
+  }
+  *out = heads;
+  *count = n;
+  return 0;
+}
+
+// Record the head of `key_path` as spent. Called at the moment the key's
+// first bytes are about to be consumed for the first time, BEFORE any
+// consumption is committed: recorded-but-unspent (after a crash) costs at
+// worst a spurious refusal of a key that was never actually used, while
+// spent-but-unrecorded would silently lose the very protection the
+// registry provides. A failure here must therefore abort the caller's
+// operation while nothing has been spent yet.
+static int spent_head_record(const char *keychain_dir, const char *direction,
+                             const char *key_path)
+{
+  // Test-only fault injection: proves a failed record aborts the
+  // operation before key material is spent. A no-op when unset.
+  if (getenv("OTP_TEST_FAIL_SPENT_RECORD"))
+    return -1;
+
+  unsigned char head[KEY_ANCHOR_LEN];
+  FILE *kf = fopen(key_path, "rb");
+  if (!kf)
+    return -1;
+  size_t got = fread(head, 1, KEY_ANCHOR_LEN, kf);
+  fclose(kf);
+  // A key with fewer than KEY_ANCHOR_LEN bytes cannot be recorded (or
+  // later searched for) without false positives; what a missed record
+  // leaves unprotected is smaller than one anchor.
+  if (got < KEY_ANCHOR_LEN)
+    return 0;
+
+  uint64_t roll = anchor_hash(head, KEY_ANCHOR_LEN);
+  uint64_t confirm = confirm_hash(head, KEY_ANCHOR_LEN);
+
+  // Skip an entry that is already present: crash recovery can pass
+  // through offset 0 more than once for the same head.
+  SpentHead *heads = NULL;
+  size_t n = 0;
+  if (spent_heads_load(keychain_dir, &heads, &n) != 0)
+    return -1;
+  for (size_t i = 0; i < n; i++)
+  {
+    if (heads[i].roll == roll && heads[i].confirm == confirm &&
+        strcmp(heads[i].direction, direction) == 0)
+    {
+      free(heads);
+      return 0;
+    }
+  }
+  free(heads);
+
+  char path[600];
+  spent_heads_path(keychain_dir, path, sizeof(path));
+  // O_APPEND with a single sub-buffer-sized write, so two processes
+  // spending different contacts' keys at once interleave whole lines,
+  // never fragments. Created 0600 like everything else in .keychain.
+  int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_BINARY_FLAG, 0600);
+  if (fd < 0)
+    return -1;
+  FILE *f = fdopen(fd, "ab");
+  if (!f)
+  {
+    close(fd);
+    return -1;
+  }
+  int rc = 0;
+  if (fprintf(f, "v1 %s %016llx %016llx\n", direction,
+              (unsigned long long)roll, (unsigned long long)confirm) < 0 ||
+      fflush(f) != 0 || fsync(fileno(f)) != 0)
+    rc = -1;
+  if (fclose(f) != 0)
+    rc = -1;
+  return rc;
+}
+
+// Scan `path` for any registered spent head at any byte offset, with the
+// same rolling hash the pairwise search uses. Returns 1 and the matching
+// entry's index, 0 when clean, and -1 when the scan could not be carried
+// out - which callers must treat as "not proven clean", never as clean.
+static int spent_heads_scan_file(const char *path, const SpentHead *heads,
+                                 size_t count, size_t *match)
+{
+  if (count == 0)
+    return 0;
+
+  FILE *f = fopen(path, "rb");
+  unsigned char *buf = malloc(KEY_COMPARE_CHUNK);
+  if (!f || !buf)
+  {
+    free(buf);
+    if (f)
+      fclose(f);
+    return -1;
+  }
+
+  uint64_t out_weight = rolling_out_weight();
+  unsigned char window[KEY_ANCHOR_LEN];
+  uint64_t h = 0;
+  size_t pos = 0;
+  int result = 0;
+
+  size_t n;
+  while (result == 0 && (n = fread(buf, 1, KEY_COMPARE_CHUNK, f)) > 0)
+  {
+    for (size_t i = 0; i < n && result == 0; i++)
+    {
+      unsigned char c = buf[i];
+      if (pos >= KEY_ANCHOR_LEN)
+        h = (h - (uint64_t)window[pos % KEY_ANCHOR_LEN] * out_weight) * KEY_HASH_BASE + c;
+      else
+        h = h * KEY_HASH_BASE + c;
+      window[pos % KEY_ANCHOR_LEN] = c;
+      pos++;
+      if (pos < KEY_ANCHOR_LEN)
+        continue;
+
+      // The confirm digest is computed at most once per position, and
+      // only when some entry's rolling hash already matched.
+      uint64_t confirm = 0;
+      int have_confirm = 0;
+      for (size_t e = 0; e < count; e++)
+      {
+        if (heads[e].roll != h)
+          continue;
+        if (!have_confirm)
+        {
+          unsigned char ordered[KEY_ANCHOR_LEN];
+          size_t start = pos - KEY_ANCHOR_LEN;
+          for (int j = 0; j < KEY_ANCHOR_LEN; j++)
+            ordered[j] = window[(start + j) % KEY_ANCHOR_LEN];
+          confirm = confirm_hash(ordered, KEY_ANCHOR_LEN);
+          have_confirm = 1;
+        }
+        if (heads[e].confirm == confirm)
+        {
+          *match = e;
+          result = 1;
+          break;
+        }
+      }
+    }
+  }
+
+  if (result == 0 && ferror(f))
+    result = -1;
+
+  free(buf);
+  fclose(f);
+  return result;
 }
 
 // A contact name that has been used before is a reuse hazard the program
@@ -875,9 +1299,13 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
                 : (overlap == KEY_OVERLAP_PREFIX
                        ? " - the smaller file is the beginning of the larger one, so the whole of it "
                          "is key that the larger file also covers"
-                       : " - the smaller file is the tail of the larger one, which is what a partially "
-                         "consumed key or a \".next\" file looks like; every byte it holds is still "
-                         "present in the larger file"));
+                       : (overlap == KEY_OVERLAP_SUFFIX
+                              ? " - the smaller file is the tail of the larger one, which is what a partially "
+                                "consumed key or a \".next\" file looks like; every byte it holds is still "
+                                "present in the larger file"
+                              : " - a stretch of one appears inside the other at an interior offset, which "
+                                "is what a pad trimmed at both ends (or two windows cut from one pad) "
+                                "looks like; every shared byte is one pad serving two roles")));
     return -1;
   }
 
@@ -887,6 +1315,150 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
     fprintf(stderr, "Error: Cannot determine keychain directory\n");
     return -1;
   }
+
+  // The pair check above only rules out overlap between the two candidate
+  // files themselves. The same pad must also not already be installed for
+  // any OTHER contact: two contacts each consume their copy from its own
+  // start, so shared material means two different messages encrypted or
+  // decrypted with the same bytes. One shape is treated differently - the
+  // mirrored pair (candidate enc = an existing dec, candidate dec = an
+  // existing enc), which is how a single machine legitimately operates
+  // both endpoints of its own pads (e.g. loopback testing in one
+  // directory). That is allowed with a warning; same-direction overlap is
+  // refused outright.
+  struct
+  {
+    const char *path;
+    size_t size;
+    const char *word;
+  } cands[2] = {
+      {encryption_key_file, enc_size, "encryption"},
+      {decryption_key_file, dec_size, "decryption"}};
+
+  for (int i = 0; i < g_keychain.count; i++)
+  {
+    Contact *other = &g_keychain.contacts[i];
+    struct
+    {
+      const char *path;
+      const char *word;
+    } theirs[2] = {
+        {other->EncryptionKeyPath, "encryption"},
+        {other->DecryptionKeyPath, "decryption"}};
+
+    for (int t = 0; t < 2; t++)
+    {
+      if (theirs[t].path[0] == '\0')
+        continue;
+      unsigned long long their_size;
+      if (otp_file_size(theirs[t].path, &their_size) != 0)
+      {
+        fprintf(stderr,
+                "Error: Could not read contact '%s's %s key to rule out shared key material "
+                "with the new contact. Refusing to add rather than risk installing an "
+                "already-installed pad - resolve the failure and retry.\n",
+                other->Name, theirs[t].word);
+        return -1;
+      }
+      if (their_size == 0)
+        continue; // fully consumed - nothing left to overlap with
+
+      for (int cnd = 0; cnd < 2; cnd++)
+      {
+        KeyOverlap cross = key_files_overlap(cands[cnd].path, theirs[t].path,
+                                             cands[cnd].size, (size_t)their_size);
+        if (cross == KEY_OVERLAP_UNKNOWN)
+        {
+          fprintf(stderr,
+                  "Error: Could not compare '%s' against contact '%s's %s key to rule out "
+                  "shared key material. Refusing to add the contact rather than risk "
+                  "installing one pad twice - resolve the failure and retry.\n",
+                  cands[cnd].path, other->Name, theirs[t].word);
+          return -1;
+        }
+        if (cross == KEY_OVERLAP_NONE)
+          continue;
+        if (cnd == t)
+        {
+          fprintf(stderr,
+                  "Error: '%s' holds the same key material as contact '%s's %s key. One pad "
+                  "installed under two contacts is consumed twice from its own start, so two "
+                  "different messages would share key bytes - a broken one-time pad. Every "
+                  "contact needs key material no other contact holds.\n",
+                  cands[cnd].path, other->Name, theirs[t].word);
+          return -1;
+        }
+        fprintf(stderr,
+                "Warning: '%s' matches contact '%s's %s key - this pair looks like the "
+                "other endpoint of that contact's pads. That is only safe when this "
+                "keychain deliberately operates both correspondents (for example loopback "
+                "testing in one directory); between two real contacts a shared pad breaks.\n",
+                cands[cnd].path, other->Name, theirs[t].word);
+      }
+    }
+  }
+
+  // Keys of *removed* contacts no longer exist to be compared against;
+  // the spent-heads registry is what remains of them. A candidate that
+  // contains a recorded spent head is (a copy of) an original whose
+  // opening bytes already encrypted or decrypted messages here.
+  SpentHead *spent = NULL;
+  size_t spent_count = 0;
+  if (spent_heads_load(keychain_dir, &spent, &spent_count) != 0)
+  {
+    fprintf(stderr,
+            "Error: Could not read the spent-key registry (%s%cspent_heads) to check the "
+            "supplied keys against previously consumed material. Refusing to add the "
+            "contact rather than risk re-installing a spent pad - resolve the failure "
+            "and retry.\n",
+            keychain_dir, PATH_SEPARATOR);
+    return -1;
+  }
+  for (int cnd = 0; cnd < 2 && spent_count > 0; cnd++)
+  {
+    size_t m = 0;
+    int hit = spent_heads_scan_file(cands[cnd].path, spent, spent_count, &m);
+    if (hit < 0)
+    {
+      fprintf(stderr,
+              "Error: Could not scan '%s' against the spent-key registry. Refusing to add "
+              "the contact rather than risk re-installing a spent pad - resolve the "
+              "failure and retry.\n",
+              cands[cnd].path);
+      free(spent);
+      return -1;
+    }
+    if (hit == 1)
+    {
+      int cand_is_enc = (cnd == 0);
+      int spent_as_enc = (strcmp(spent[m].direction, "enc") == 0);
+      if (!cand_is_enc && spent_as_enc)
+      {
+        // The mirrored-endpoint case again, this time against history: a
+        // decryption key holding an enc-spent head will decrypt exactly
+        // the messages those bytes already encrypted - no new exposure.
+        fprintf(stderr,
+                "Warning: '%s' contains the head of key material this keychain already "
+                "spent for encryption. As a decryption key it will decrypt exactly those "
+                "already-sent messages - sensible only when this keychain deliberately "
+                "acts as the other endpoint of its own pads.\n",
+                cands[cnd].path);
+      }
+      else
+      {
+        fprintf(stderr,
+                "Error: '%s' contains key material that was already spent on this keychain: "
+                "its bytes include the head of a %s key consumed by a previous message "
+                "(possibly under a contact that has since been removed). Using them again "
+                "would cover two messages with one pad. Supply only never-used key "
+                "material, or the partially consumed remainder file if you kept it.\n",
+                cands[cnd].path, spent_as_enc ? "encryption" : "decryption");
+        free(spent);
+        return -1;
+      }
+    }
+  }
+  free(spent);
 
   warn_if_name_previously_used(keychain_dir, name);
 
@@ -1416,6 +1988,23 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
     return -1;
   }
 
+  // Offset 0 means the head on disk is still the head from add time, and
+  // this operation is about to spend it for the first time. Record its
+  // fingerprint in the spent-heads registry first, so a copy of the
+  // original file stays recognizable if it is ever re-supplied after this
+  // contact is removed. Fail closed: nothing has been read or spent yet,
+  // so aborting here costs only a retry, while continuing unrecorded
+  // would silently forfeit that protection forever.
+  if (c->EncryptionKeyOffset == 0 &&
+      spent_head_record(keychain_dir, "enc", c->EncryptionKeyPath) != 0)
+  {
+    fprintf(stderr,
+            "Error: could not record the spent-key fingerprint for contact '%s'; "
+            "aborting before any key material is spent\n",
+            contact_name);
+    return -1;
+  }
+
   size_t available_key = c->EncryptionKeySize;
 
   // Open encryption key file (always read from beginning)
@@ -1729,6 +2318,19 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   if (c->DecryptionKeySize == 0)
   {
     fprintf(stderr, "Error: No decryption key remaining for contact '%s'\n", contact_name);
+    return -1;
+  }
+
+  // First consumption of this key - record its head in the spent-heads
+  // registry before anything is spent. See encrypt_with_contact_locked
+  // for why this must happen first and must fail closed.
+  if (c->DecryptionKeyOffset == 0 &&
+      spent_head_record(keychain_dir, "dec", c->DecryptionKeyPath) != 0)
+  {
+    fprintf(stderr,
+            "Error: could not record the spent-key fingerprint for contact '%s'; "
+            "aborting before any key material is spent\n",
+            contact_name);
     return -1;
   }
 
