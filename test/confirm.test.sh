@@ -31,6 +31,7 @@ echo ""
 echo "   - Delivery-confirmation gate"
 
 # helper: ciphertext for PLAINFILE against KEYFILE at offset OFF -> OUT
+. test/xor.helper.sh
 confirm_cipher() {
   KEYFILE=$1
   PLAINFILE=$2
@@ -38,8 +39,8 @@ confirm_cipher() {
   OUT=$4
   LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
   dd if="$KEYFILE" of=confirm_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-  ./bin/otp confirm_slice.tmp < "$PLAINFILE" > "$OUT" 2>/dev/null
-  rm -f confirm_slice.tmp confirm_slice.tmp.*.next
+  xor_with_key confirm_slice.tmp "$PLAINFILE" "$OUT"
+  rm -f confirm_slice.tmp
 }
 
 dd if=/dev/urandom of=confirm_key1.txt bs=1 count=1000 2>/dev/null

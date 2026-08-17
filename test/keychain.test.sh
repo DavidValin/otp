@@ -664,8 +664,8 @@ fi
 dd if=/dev/urandom of=smallmsg.txt bs=1 count=100 2>/dev/null
 ./bin/otp -c multichunktest --encrypt < smallmsg.txt > multichunk_cipher.bin 2>/dev/null
 
-dd if=multichunk_key.txt of=multichunk_key_prefix.txt bs=1 count=100 2>/dev/null
-./bin/otp multichunk_key_prefix.txt < smallmsg.txt > expected_cipher.bin 2>/dev/null
+. test/xor.helper.sh
+xor_with_key multichunk_key.txt smallmsg.txt expected_cipher.bin
 
 cmp -s multichunk_cipher.bin expected_cipher.bin
 if [ $? -eq 0 ]; then
@@ -675,8 +675,8 @@ else
   exit 1
 fi
 
-rm -f multichunk_key.txt multichunk_key_prefix.txt bigmsg.txt smallmsg.txt multichunk_partial_output.bin
-rm -f multichunk_cipher.bin expected_cipher.bin multichunk_key_prefix.txt.*.next
+rm -f multichunk_key.txt bigmsg.txt smallmsg.txt multichunk_partial_output.bin
+rm -f multichunk_cipher.bin expected_cipher.bin
 
 # -----------------------------------------------------------------------------
 #  test error: missing --encrypt or --decrypt flag
@@ -1195,9 +1195,9 @@ else
   exit 1
 fi
 
-# The tail of an installed pad is what a ".next" file or a partially
-# consumed key looks like - handing it to a second contact is the same
-# overlap and must be caught across contacts, not only within one pair.
+# The tail of an installed pad is what a partially consumed key looks
+# like - handing it to a second contact is the same overlap and must be
+# caught across contacts, not only within one pair.
 dd if=kc_ccA.txt of=kc_ccA_tail.txt bs=1 skip=100 2>/dev/null
 ./bin/otp --add-contact ccsecond kc_ccA_tail.txt kc_ccC.txt > /dev/null 2>&1
 RC=$?

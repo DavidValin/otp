@@ -7,58 +7,6 @@ else
   GREEN=; RED=; NC=
 fi
 
-# plain:              16ag
-# key:                abcdefghijklmn  (first 4 bytes in ./test_data/test.txt file)
-# expected cipher:    PT
-# expected next key:  efghijklmn      (last 4 bytes in ./test_data/test.txt file)
-export PLAIN='16ag'
-export COMPUTED_CIPHER=`printf '%s' $PLAIN | ./bin/otp ./test/test_data/test.txt`
-export EXPECTED_CIPHER=$(printf 'PT\x02\x03')
-export EXPECTED_NEXT_KEY="efghijklmn"
-export NOW=`date +"%Y-%m-%d_%H-%M-%S"`
-
-# -----------------------------------------------------------------------------
-#  test encryption / decryption
-# -----------------------------------------------------------------------------
-
-echo ""
-echo "   - Encryption / Decryption algorythm"
-
-if [ "$COMPUTED_CIPHER" = "$EXPECTED_CIPHER" ]; then
-  echo "     - ${GREEN}PASS${NC} - output is correct"
-else
-  echo "     ! ${RED}FAIL${NC} - Expected $EXPECTED_CIPHER but got $COMPUTED_CIPHER"
-  exit 1
-fi
-
-if test -f "./test/test_data/test.txt.$NOW.next"; then
-  echo "     - ${GREEN}PASS${NC} - next key file was created"
-else
-  echo "     - ${RED}FAIL${NC} - next key file was NOT created!"
-  exit 1
-fi
-
-export NEXT_KEY=`cat ./test/test_data/test.txt.$NOW.next`
-if [ "$NEXT_KEY" = "$EXPECTED_NEXT_KEY" ]; then
-  echo "     - ${GREEN}PASS${NC} - next key file has correct key (content)"
-else
-  echo "     ! ${RED}FAIL${NC} - next key file has WRONG key (content), expected '$EXPECTED_NEXT_KEY' but got '$NEXT_KEY'"
-  exit 1
-fi
-
-rm ./test/test_data/test.txt.$NOW.next
-
-export COMPUTED_PLAN_FROM_CIPHER=`printf '%s' $COMPUTED_CIPHER | ./bin/otp ./test/test_data/test.txt`
-if [ "$COMPUTED_PLAN_FROM_CIPHER" = "$PLAIN" ]; then
-  echo "     - ${GREEN}PASS${NC} - decryption (content) is correct"
-else
-  echo "     ! ${RED}FAIL${NC} - decryption (content) is incorrect, expected '$PLAIN' but got '$COMPUTED_PLAN_FROM_CIPHER'"
-  exit 1
-fi
-
-# the decryption run above writes its own timestamped .next file - remove it
-rm -f ./test/test_data/test.txt.*.next
-
 # -----------------------------------------------------------------------------
 #  test key pair generation
 # -----------------------------------------------------------------------------
@@ -186,6 +134,34 @@ else
     exit 1
   fi
 fi
+echo ""
+
+# -----------------------------------------------------------------------------
+#  the removed direct key-file mode must be rejected, not silently accepted
+# -----------------------------------------------------------------------------
+# `otp <keyfile>` used to encrypt stdin against a bare key file. That mode
+# is gone; a leftover script still invoking it must get an error and no
+# output, never ciphertext produced outside the keychain's key accounting.
+echo "   - Direct key-file invocation is rejected"
+
+printf 'somekeymaterial' > direct_mode_key.tmp
+DIRECT_OUT=$(printf 'plain' | ./bin/otp direct_mode_key.tmp 2>direct_mode_err.tmp)
+DIRECT_RC=$?
+if [ $DIRECT_RC -ne 0 ] && [ -z "$DIRECT_OUT" ] && grep -q "Unknown command" direct_mode_err.tmp; then
+  echo "     - ${GREEN}PASS${NC} - a bare key-file argument fails with an unknown-command error"
+else
+  echo "     ! ${RED}FAIL${NC} - expected a rejection (got exit $DIRECT_RC, stdout '$DIRECT_OUT')"
+  rm -f direct_mode_key.tmp direct_mode_err.tmp direct_mode_key.tmp.*.next
+  exit 1
+fi
+if ls direct_mode_key.tmp.*.next > /dev/null 2>&1; then
+  echo "     ! ${RED}FAIL${NC} - the rejected invocation still produced a .next file"
+  rm -f direct_mode_key.tmp direct_mode_err.tmp direct_mode_key.tmp.*.next
+  exit 1
+else
+  echo "     - ${GREEN}PASS${NC} - no .next successor file was created"
+fi
+rm -f direct_mode_key.tmp direct_mode_err.tmp
 echo ""
 
 # -----------------------------------------------------------------------------

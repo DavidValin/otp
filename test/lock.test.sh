@@ -94,6 +94,7 @@ LENB=$(wc -c < lock_plainB.txt | tr -d ' ')
 # Both messages are the same length here, so exactly one of {0, LENA} must
 # be the offset A's ciphertext was really produced with, and likewise for
 # B - and they must land on DIFFERENT offsets from each other.
+. test/xor.helper.sh
 find_offset() {
   # args: plainfile cipherfile -> prints the offset that reproduces cipherfile, or "NONE"
   PLAINFILE=$1
@@ -101,8 +102,8 @@ find_offset() {
   LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
   for OFF in 0 "$LEN"; do
     dd if=lock_key2.txt of=lock_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-    ./bin/otp lock_slice.tmp < "$PLAINFILE" > lock_expected.tmp 2>/dev/null
-    rm -f lock_slice.tmp lock_slice.tmp.*.next
+    xor_with_key lock_slice.tmp "$PLAINFILE" lock_expected.tmp
+    rm -f lock_slice.tmp
     if cmp -s lock_expected.tmp "$CIPHERFILE"; then
       rm -f lock_expected.tmp
       echo "$OFF"
@@ -192,8 +193,8 @@ find_dec_offset() {
   LEN=$(wc -c < "$CIPHERFILE" | tr -d ' ')
   for OFF in 0 "$LEN"; do
     dd if=lock_key3.txt.dec of=lock_dslice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-    ./bin/otp lock_dslice.tmp < "$CIPHERFILE" > lock_dexpected.tmp 2>/dev/null
-    rm -f lock_dslice.tmp lock_dslice.tmp.*.next
+    xor_with_key lock_dslice.tmp "$CIPHERFILE" lock_dexpected.tmp
+    rm -f lock_dslice.tmp
     if cmp -s lock_dexpected.tmp "$PLAINFILE"; then
       rm -f lock_dexpected.tmp
       echo "$OFF"
