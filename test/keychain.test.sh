@@ -245,18 +245,19 @@ fi
 echo "     Testing add contact with key files..."
 
 # Generate a key pair for testing
+rm -rf testalice_keys testbob_keys
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 testalice testbob > /dev/null 2>&1
 rm tmpkey
 
 # Verify key files were created
-if [ ! -f "encryption_testalice.txt" ] || [ ! -f "decryption_testalice.txt" ]; then
+if [ ! -f "testalice_keys/encryption_for_testbob.key" ] || [ ! -f "testalice_keys/decryption_from_testbob.key" ]; then
   echo "     ! ${RED}FAIL${NC} - key pair generation failed"
   exit 1
 fi
 
 # Add contact with keys
-./bin/otp --add-contact testcontact encryption_testalice.txt decryption_testalice.txt > /dev/null
+./bin/otp --add-contact testcontact testalice_keys/encryption_for_testbob.key testalice_keys/decryption_from_testbob.key > /dev/null
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - add contact with keys succeeded"
 else
@@ -311,12 +312,12 @@ fi
 echo "     Testing encryption with contact..."
 
 # Create a contact with keys for testing (fresh keychain from here on)
-rm -rf .keychain
+rm -rf .keychain enctest_keys dectest_keys
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
 cat tmpkey | ./bin/otp --new-key-pair 1 enctest dectest > /dev/null 2>&1
 rm tmpkey
 
-./bin/otp --add-contact enctest encryption_enctest.txt decryption_enctest.txt > /dev/null 2>&1
+./bin/otp --add-contact enctest enctest_keys/encryption_for_dectest.key enctest_keys/decryption_from_dectest.key > /dev/null 2>&1
 
 # Encrypt a message
 PLAIN_MSG="Hello, World!"
@@ -383,7 +384,7 @@ fi
 echo "     Testing decryption with contact..."
 
 # Create Bob with matching keys (Alice's decryption = Bob's encryption)
-./bin/otp --add-contact dectest encryption_dectest.txt decryption_dectest.txt > /dev/null 2>&1
+./bin/otp --add-contact dectest dectest_keys/encryption_for_enctest.key dectest_keys/decryption_from_enctest.key > /dev/null 2>&1
 
 # Decrypt the cipher using dectest's decryption key
 ./bin/otp -c dectest --decrypt < test_cipher.bin > test_decrypted.txt 2>/dev/null
@@ -621,19 +622,19 @@ echo "     Testing full round-trip with separate keychains..."
 # all. Each gets its own working directory (and therefore its own
 # .keychain/).
 OTP_BIN="$(pwd)/bin/otp"
-rm -rf alice_home bob_home
+rm -rf alice_home bob_home alice_keys bob_keys
 mkdir -p alice_home bob_home
 
 dd if=/dev/urandom of=tmpkey bs=1M count=2 2>/dev/null
 cat tmpkey | "$OTP_BIN" --new-key-pair 1 alice bob > /dev/null 2>&1
 rm tmpkey
 
-# Alice receives her half of the key pair, Bob receives his
-mv encryption_alice.txt decryption_alice.txt alice_home/
-mv encryption_bob.txt decryption_bob.txt bob_home/
+# Alice receives her key directory, Bob receives his
+mv alice_keys alice_home/
+mv bob_keys bob_home/
 
-(cd alice_home && "$OTP_BIN" --add-contact bob encryption_alice.txt decryption_alice.txt > /dev/null 2>&1)
-(cd bob_home && "$OTP_BIN" --add-contact alice encryption_bob.txt decryption_bob.txt > /dev/null 2>&1)
+(cd alice_home && "$OTP_BIN" --add-contact bob alice_keys/encryption_for_bob.key alice_keys/decryption_from_bob.key > /dev/null 2>&1)
+(cd bob_home && "$OTP_BIN" --add-contact alice bob_keys/encryption_for_alice.key bob_keys/decryption_from_alice.key > /dev/null 2>&1)
 
 # Test 1: Alice encrypts to Bob
 ALICE_MSG="Top secret message from Alice"
@@ -1220,12 +1221,9 @@ rm -f kc_spentkey.txt kc_spentdec.txt kc_freshdec.txt kc_spentremainder.txt kc_n
 echo "     Cleaning up test files..."
 
 rm -rf .keychain
-rm -f encryption_testalice.txt decryption_testalice.txt
-rm -f encryption_testbob.txt decryption_testbob.txt
-rm -f encryption_enctest.txt decryption_enctest.txt
-rm -f encryption_dectest.txt decryption_dectest.txt
-rm -f encryption_alice.txt decryption_alice.txt
-rm -f encryption_bob.txt decryption_bob.txt
+rm -rf testalice_keys testbob_keys
+rm -rf enctest_keys dectest_keys
+rm -rf alice_keys bob_keys
 rm -f smallkey.txt roundtrip_msg1.bin roundtrip_msg2.bin
 rm -f smallkey.txt.dec kc_* multichunk_key*
 rm -f test_plain.txt test_plain2.txt test_cipher.bin test_cipher2.bin test_decrypted.txt

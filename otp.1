@@ -46,7 +46,7 @@ Display this help message and exit.
 
 .TP
 .B \-nk, \-\-new-key-pair
-Generate a new key pair.  The program expects two key files for encryption and decryption.  The key material is read from standard input: the first half is written to an encryption file named ``encryption_<part_a_name>.txt``; the second half to ``decryption_<part_a_name>.txt``; and so on for ``part_b_name``.  The first argument is the size in megabytes (e.g., ``5`` for 5 MiB).  Example: cat /dev/urandom | otp --new-key-pair 5 partA partB
+Generate a new key pair.  The key material is read from standard input and each party's pair of keys is written into its own directory, each file named for the correspondent it is used with: ``<part_a_name>_keys/encryption_for_<part_b_name>.key`` and ``<part_a_name>_keys/decryption_from_<part_b_name>.key``, and likewise ``<part_b_name>_keys/encryption_for_<part_a_name>.key`` and ``<part_b_name>_keys/decryption_from_<part_a_name>.key``.  Each directory holds exactly what that party receives: the key it uses to encrypt messages sent to the other party, and the key it uses to decrypt messages received from the other party.  The first argument is the size in megabytes (e.g., ``5`` for 5 MiB).  Standard input must be a pipe or a file: when it is a terminal (no randomness source piped in), the command fails immediately, before creating any directory or file, instead of blocking on keyboard input.  Example: cat /dev/urandom | otp --new-key-pair 5 partA partB
 
 .TP
 .B \-ac, \-\-add-contact <contact_name> [<encryption_key_file> <decryption_key_file>]
@@ -172,7 +172,7 @@ The keychain-based encryption follows these steps:
 .PP
 .B 1. Key Pair Generation
 .br
-Generate matching key pairs for two parties (e.g., Alice and Bob) using --new-key-pair. This creates four files: encryption_alice.txt (Alice's encryption key = Bob's decryption key) and decryption_alice.txt (Alice's decryption key = Bob's encryption key), plus the corresponding pair for Bob.
+Generate matching key pairs for two parties (e.g., Alice and Bob) using --new-key-pair. This creates two directories with two files each: alice_keys/encryption_for_bob.key (Alice's encryption key = Bob's decryption key) and alice_keys/decryption_from_bob.key (Alice's decryption key = Bob's encryption key), plus the corresponding bob_keys/ pair for Bob.
 .PP
 .B 2. Add Contacts to Keychain
 .br
@@ -277,7 +277,7 @@ This example demonstrates the complete workflow for setting up and using the key
 
 .B Step 1: Generate Key Pairs (Run on a secure machine)
 .PP
-Generate a 1MB key pair for Alice and Bob. This creates four files with matching keys:
+Generate a 1MB key pair for Alice and Bob. This creates two directories, one per party, each holding that party's matching pair of keys:
 .PP
 .nf
 .B cat /dev/urandom | otp --new-key-pair 1 alice bob
@@ -285,24 +285,24 @@ Generate a 1MB key pair for Alice and Bob. This creates four files with matching
 .PP
 This creates:
 .RS
-\- encryption_alice.txt (Alice uses to encrypt, Bob uses to decrypt)
+\- alice_keys/encryption_for_bob.key (Alice uses to encrypt, Bob uses to decrypt)
 .br
-\- decryption_alice.txt (Alice uses to decrypt, Bob uses to encrypt)
+\- alice_keys/decryption_from_bob.key (Alice uses to decrypt, Bob uses to encrypt)
 .br
-\- encryption_bob.txt (Bob uses to encrypt, Alice uses to decrypt)
+\- bob_keys/encryption_for_alice.key (Bob uses to encrypt, Alice uses to decrypt)
 .br
-\- decryption_bob.txt (Bob uses to decrypt, Alice uses to encrypt)
+\- bob_keys/decryption_from_alice.key (Bob uses to decrypt, Alice uses to encrypt)
 .RE
 .PP
-Note: encryption_alice.txt and decryption_bob.txt contain identical keys, as do encryption_bob.txt and decryption_alice.txt.
+Note: alice_keys/encryption_for_bob.key and bob_keys/decryption_from_alice.key contain identical keys, as do bob_keys/encryption_for_alice.key and alice_keys/decryption_from_bob.key.
 
 .B Step 2: Distribute Keys Securely
 .PP
 Transfer the keys to Alice and Bob via a secure, out-of-band method (e.g., encrypted USB drive, in-person exchange):
 .RS
-\- Alice receives: encryption_alice.txt and decryption_alice.txt
+\- Alice receives the alice_keys/ directory (encryption_for_bob.key and decryption_from_bob.key)
 .br
-\- Bob receives: encryption_bob.txt and decryption_bob.txt
+\- Bob receives the bob_keys/ directory (encryption_for_alice.key and decryption_from_alice.key)
 .RE
 .PP
 
@@ -311,16 +311,16 @@ Transfer the keys to Alice and Bob via a secure, out-of-band method (e.g., encry
 On Alice's machine:
 .PP
 .nf
-.B otp --add-contact bob encryption_alice.txt decryption_alice.txt
+.B otp --add-contact bob alice_keys/encryption_for_bob.key alice_keys/decryption_from_bob.key
 .fi
 .PP
 Output:
 .RS
 Contact 'bob' added with keys:
 .br
-  Encryption key: 1048576 bytes from encryption_alice.txt
+  Encryption key: 1048576 bytes from alice_keys/encryption_for_bob.key
 .br
-  Decryption key: 1048576 bytes from decryption_alice.txt
+  Decryption key: 1048576 bytes from alice_keys/decryption_from_bob.key
 .RE
 .PP
 
@@ -329,16 +329,16 @@ Contact 'bob' added with keys:
 On Bob's machine:
 .PP
 .nf
-.B otp --add-contact alice encryption_bob.txt decryption_bob.txt
+.B otp --add-contact alice bob_keys/encryption_for_alice.key bob_keys/decryption_from_alice.key
 .fi
 .PP
 Output:
 .RS
 Contact 'alice' added with keys:
 .br
-  Encryption key: 1048576 bytes from encryption_bob.txt
+  Encryption key: 1048576 bytes from bob_keys/encryption_for_alice.key
 .br
-  Decryption key: 1048576 bytes from decryption_bob.txt
+  Decryption key: 1048576 bytes from bob_keys/decryption_from_alice.key
 .RE
 .PP
 

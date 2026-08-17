@@ -76,6 +76,8 @@
  * silently misreport keys larger than 2GB. */
 #define close _close
 #define open _open
+#define mkdir(path, mode) _mkdir(path)
+#define rmdir _rmdir
 #define fstat _fstat64
 #define stat64_t struct _stat64
 #define getpid _getpid
@@ -90,14 +92,35 @@
 #define O_BINARY 0
 #endif
 
-/* --new-key-pair writes four files; the two pads it draws from stdin are
- * each written to two of them. Close and remove every one created so
+/* Does a standard stream refer to an interactive terminal? stdin: used
+ * by --new-key-pair to fail fast instead of blocking on a stdin nobody
+ * is feeding. stdout: gates the generation progress spinner and ANSI
+ * colors, so redirected or piped output stays plain text. */
+#ifdef _WIN32
+#define otp_isatty(f) _isatty(_fileno(f))
+#else
+#define otp_isatty(f) isatty(fileno(f))
+#endif
+#define otp_stdin_is_tty() otp_isatty(stdin)
+#define otp_stdout_is_tty() otp_isatty(stdout)
+
+/* ANSI colors for the key-pair generation report; emitted only when
+ * stdout is a terminal. */
+#define OTP_GREEN "\x1b[32m"
+#define OTP_YELLOW "\x1b[33m"
+#define OTP_RESET "\x1b[0m"
+
+/* --new-key-pair writes four files, two per party, each pair inside its
+ * own <name>_keys/ directory; the two pads it draws from stdin are each
+ * written to two of the files. Close and remove every file created so
  * far: a half-written set is not usable as a pad, and leaving it behind
  * would also block the retry with EEXIST, since these are created
  * O_EXCL. remove() rather than unlink() - it is standard C and needs no
  * per-platform mapping. */
 #define KEYPAIR_FILES 4
-static void keypair_cleanup(FILE *files[KEYPAIR_FILES], char names[KEYPAIR_FILES][256])
+#define KEYPAIR_DIRS 2
+static void keypair_cleanup(FILE *files[KEYPAIR_FILES], char names[KEYPAIR_FILES][256],
+                            char dirs[KEYPAIR_DIRS][256])
 {
   for (int i = 0; i < KEYPAIR_FILES; i++)
   {
@@ -109,6 +132,30 @@ static void keypair_cleanup(FILE *files[KEYPAIR_FILES], char names[KEYPAIR_FILES
     if (names[i][0])
       remove(names[i]);
   }
+  /* Only directories this run created are recorded in dirs[], so a
+   * pre-existing <name>_keys/ the user already had is never deleted.
+   * rmdir() also refuses a non-empty directory, so any file we did not
+   * create (and therefore did not remove above) keeps its directory. */
+  for (int i = 0; i < KEYPAIR_DIRS; i++)
+  {
+    if (dirs[i][0])
+      rmdir(dirs[i]);
+  }
+}
+
+/* Progress spinner shown while the pads stream from stdin, so a long
+ * generation visibly distinguishes "working" from "hung". Active only
+ * when the frame index is >= 0 (set by the caller when stdout is a
+ * terminal); one tick per streamed chunk, each overwriting the previous
+ * frame with a backspace. */
+static int keypair_spinner_frame = -1;
+static void keypair_spinner_tick(void)
+{
+  static const char frames[] = "|/-\\";
+  if (keypair_spinner_frame < 0)
+    return;
+  printf("\b%c", frames[keypair_spinner_frame++ & 3]);
+  fflush(stdout);
 }
 
 /* Stream `size` bytes from stdin into two files at once, one chunk at a
@@ -133,6 +180,7 @@ static int keypair_stream_pad(unsigned char *buf, size_t size,
       fprintf(stderr, "Error writing %s key: %s\n", what, strerror(errno));
       return -1;
     }
+    keypair_spinner_tick();
     left -= want;
   }
   return 0;
@@ -166,7 +214,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
   {
-    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\n");
+    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\n");
     return 0;
   }
 
@@ -338,6 +386,21 @@ int main(int argc, char *argv[])
 
   if (argc >= 5 && (strcmp(argv[1], "-nk") == 0 || strcmp(argv[1], "--new-key-pair") == 0))
   {
+    /* Key material is read from stdin, so a terminal there means no
+     * randomness source was piped in: the command would silently block
+     * waiting for megabytes of typed input - and keyboard input is not
+     * pad-quality randomness anyway. Checked before anything else, so a
+     * refused run creates no directory and no file. */
+    if (otp_stdin_is_tty())
+    {
+      fprintf(stderr,
+              "Error: --new-key-pair reads key material from stdin, but stdin is a "
+              "terminal.\nPipe in a randomness source, e.g.:\n"
+              "  cat /dev/urandom | otp --new-key-pair %s %s %s\n",
+              argv[2], argv[3], argv[4]);
+      return 1;
+    }
+
     const char *size_str = argv[2];
     char *endptr = NULL;
     double size_mb = strtod(size_str, &endptr);
@@ -364,13 +427,49 @@ int main(int argc, char *argv[])
 
     /* Part A's encryption key is Part B's decryption key and vice versa,
      * so each of the two pads read from stdin is written to two files.
-     * Created in this order, all O_EXCL and 0600. */
+     * Each party gets its own directory, <name>_keys/, holding that
+     * party's encryption_for_<peer>.key and decryption_from_<peer>.key -
+     * the pair of files that party receives, ready to hand over as one
+     * unit, each named for the correspondent it is used with. Directories
+     * are created 0700 (a pre-existing one is reused); files in this
+     * order, all O_EXCL and 0600. */
     char names[KEYPAIR_FILES][256] = {{0}};
     FILE *files[KEYPAIR_FILES] = {0};
-    snprintf(names[0], sizeof names[0], "encryption_%s.txt", part_a);
-    snprintf(names[1], sizeof names[1], "decryption_%s.txt", part_a);
-    snprintf(names[2], sizeof names[2], "encryption_%s.txt", part_b);
-    snprintf(names[3], sizeof names[3], "decryption_%s.txt", part_b);
+    char dirs[KEYPAIR_DIRS][256] = {{0}}; /* only directories created by this run */
+    const char *parts[KEYPAIR_DIRS] = {part_a, part_b};
+
+    for (int i = 0; i < KEYPAIR_DIRS; i++)
+    {
+      char dir[256];
+      if (snprintf(dir, sizeof dir, "%s_keys", parts[i]) >= (int)sizeof dir)
+      {
+        fprintf(stderr, "Error: name %s is too long\n", parts[i]);
+        keypair_cleanup(files, names, dirs);
+        return 1;
+      }
+      if (mkdir(dir, 0700) == 0)
+        memcpy(dirs[i], dir, sizeof dir);
+      else if (errno != EEXIST)
+      {
+        fprintf(stderr, "Error creating directory %s: %s\n", dir, strerror(errno));
+        keypair_cleanup(files, names, dirs);
+        return 1;
+      }
+    }
+
+    /* Each file is named for the correspondent it is used with, so both
+     * party names appear in every path; check truncation so a truncated
+     * path can never be created or removed. */
+    if (snprintf(names[0], sizeof names[0], "%s_keys/encryption_for_%s.key", part_a, part_b) >= (int)sizeof names[0] ||
+        snprintf(names[1], sizeof names[1], "%s_keys/decryption_from_%s.key", part_a, part_b) >= (int)sizeof names[1] ||
+        snprintf(names[2], sizeof names[2], "%s_keys/encryption_for_%s.key", part_b, part_a) >= (int)sizeof names[2] ||
+        snprintf(names[3], sizeof names[3], "%s_keys/decryption_from_%s.key", part_b, part_a) >= (int)sizeof names[3])
+    {
+      fprintf(stderr, "Error: key file path too long\n");
+      memset(names, 0, sizeof names); // truncated paths are not ours to remove
+      keypair_cleanup(files, names, dirs);
+      return 1;
+    }
 
     for (int i = 0; i < KEYPAIR_FILES; i++)
     {
@@ -378,8 +477,12 @@ int main(int argc, char *argv[])
       if (kfd < 0)
       {
         fprintf(stderr, "Error creating %s: %s\n", names[i], strerror(errno));
-        names[i][0] = '\0'; // not ours - must not be removed
-        keypair_cleanup(files, names);
+        /* Neither this file nor the ones after it were created by this
+         * run; a pre-existing file at any of those paths is not ours to
+         * remove. */
+        for (int j = i; j < KEYPAIR_FILES; j++)
+          names[j][0] = '\0';
+        keypair_cleanup(files, names, dirs);
         return 1;
       }
       files[i] = fdopen(kfd, "wb");
@@ -387,16 +490,38 @@ int main(int argc, char *argv[])
       {
         fprintf(stderr, "Error fdopen %s: %s\n", names[i], strerror(errno));
         close(kfd);
-        keypair_cleanup(files, names);
+        /* names[i] itself was just created, so it is removed; the ones
+         * after it never were. */
+        for (int j = i + 1; j < KEYPAIR_FILES; j++)
+          names[j][0] = '\0';
+        keypair_cleanup(files, names, dirs);
         return 1;
       }
     }
 
+    /* Progress line, printed before the long streaming phase. The green
+     * OK below only appears after every byte has been written and
+     * flushed, so its absence tells the user a mid-generation
+     * interruption left the keys unusable. On a terminal a spinner
+     * (ticked once per streamed chunk) shows the work is progressing;
+     * the trailing space is the placeholder its backspace overwrites. */
+    int tty_out = otp_stdout_is_tty();
+    printf("Generating key pair of %s MB... (wait for the %sOK%s message, if you don't see it, it failed) ",
+           size_str, tty_out ? OTP_GREEN : "", tty_out ? OTP_RESET : "");
+    if (tty_out)
+    {
+      keypair_spinner_frame = 0;
+      fputs(" ", stdout);
+    }
+    fflush(stdout);
+
     unsigned char *buf = malloc(KEYPAIR_CHUNK);
     if (!buf)
     {
+      fputs("\n", stdout); /* finish the progress line before the error */
+      keypair_spinner_frame = -1;
       fprintf(stderr, "Memory allocation failed\n");
-      keypair_cleanup(files, names);
+      keypair_cleanup(files, names, dirs);
       return 1;
     }
 
@@ -405,8 +530,10 @@ int main(int argc, char *argv[])
     if (keypair_stream_pad(buf, size, files[0], files[3], "first") != 0 ||
         keypair_stream_pad(buf, size, files[1], files[2], "second") != 0)
     {
+      fputs("\n", stdout);
+      keypair_spinner_frame = -1;
       free(buf);
-      keypair_cleanup(files, names);
+      keypair_cleanup(files, names, dirs);
       return 1;
     }
     free(buf);
@@ -418,13 +545,39 @@ int main(int argc, char *argv[])
     {
       if (fclose(files[i]) != 0)
       {
+        fputs("\n", stdout);
+        keypair_spinner_frame = -1;
         fprintf(stderr, "Error writing %s: %s\n", names[i], strerror(errno));
         files[i] = NULL;
-        keypair_cleanup(files, names);
+        keypair_cleanup(files, names, dirs);
         return 1;
       }
       files[i] = NULL;
     }
+
+    /* Success report: the green OK the progress line promised, on its
+     * own line after a blank one, then each party's directory in yellow
+     * with its two keys in green. On a terminal the spinner is wiped
+     * first so no stray frame remains at the end of the progress line. */
+    keypair_spinner_frame = -1;
+    if (tty_out)
+      fputs("\b \b", stdout);
+    printf("\n\n%sOK%s\n\n", tty_out ? OTP_GREEN : "", tty_out ? OTP_RESET : "");
+
+    for (int d = 0; d < KEYPAIR_DIRS; d++)
+    {
+      printf("%s%s_keys/%s\n", tty_out ? OTP_YELLOW : "", parts[d], tty_out ? OTP_RESET : "");
+      for (int f = 0; f < 2; f++)
+      {
+        const char *full = names[d * 2 + f];
+        const char *base = strrchr(full, '/');
+        base = base ? base + 1 : full;
+        printf("   %s%s%s (%zu bytes)\n",
+               tty_out ? OTP_GREEN : "", base, tty_out ? OTP_RESET : "", size);
+      }
+      putchar('\n');
+    }
+    printf("Store/Share the keys safely!\n");
     return 0;
   }
 
