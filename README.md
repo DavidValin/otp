@@ -1,16 +1,21 @@
-## One Time Pad "otp" command
+## One Time Pad cryptography toolkit - "otp" command
 
-This program takes stdin, xor's it with one-time-pad key material held in a keychain of contacts, and outputs the result to stdout.
+```
+🫡 The only unbreakable cryptographic algorithm (today and forever)
+```
+
+This program allows you to operate using one time pad cipher and a keychain. It takes stdin, xor's it with one-time-pad key material held in a keychain of contacts, and outputs the result to stdout.
 
 When using the one time pad algorithm, it is critical to remember to never reuse the part of the key that was used. The keychain enforces this automatically: every encrypt/decrypt consumes its key bytes and physically destroys them, so a spent key range can never serve a second message.
 
 ## Installation
 
+* Easy way: [Download](https://github.com/DavidValin/otp/releases)
+* Build from source: 
 ```
 make
 sudo make install
 ```
-
 * musl supported, see Makefile
 
 ## New key pair generation
@@ -34,9 +39,7 @@ cat /dev/urandom | otp --new-key-pair 1 alice bob
 
 The key material is read from **stdin**, so the randomness source must be piped in. Run without a pipe (stdin on a terminal) the command refuses immediately - before creating any directory or file - rather than sit waiting for megabytes of typed input.
 
-### The roles are inverted between the two parties
-
-This is the single most important thing to understand about generation, and getting it backwards is the most common way to end up unable to decrypt anything.
+**The roles are inverted between the two parties**. This is the single most important thing to understand about generation, and getting it backwards is the most common way to end up unable to decrypt anything.
 
 **Only two random keys are actually generated.** The command reads two independent chunks from stdin - call them **Key 1** and **Key 2** - and writes each of them out *twice*, under **inverted role names**. What one party calls its *encryption* key, the other calls its *decryption* key:
 
