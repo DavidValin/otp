@@ -54,7 +54,7 @@ expected_cipher() {
 echo "     Testing recovery window 1 (crash before any commit)..."
 
 dd if=/dev/urandom of=commit_key1.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_key1.txt.dec bs=1 count=$(wc -c < commit_key1.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_key1.txt.dec bs=1 count=$(wc -c < commit_key1.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact committest1 commit_key1.txt commit_key1.txt.dec > /dev/null 2>&1
 
 printf 'hello window one' > commit_plain1.txt
@@ -139,7 +139,7 @@ rm -rf .keychain
 echo "     Testing recovery window 2 (crash between key-file and metadata commit)..."
 
 dd if=/dev/urandom of=commit_key2.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_key2.txt.dec bs=1 count=$(wc -c < commit_key2.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_key2.txt.dec bs=1 count=$(wc -c < commit_key2.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact committest2 commit_key2.txt commit_key2.txt.dec > /dev/null 2>&1
 
 printf 'window two message content' > commit_plainA.txt
@@ -238,7 +238,7 @@ rm -rf .keychain
 echo "     Testing recovery window 3 (crash after full commit, before delivery)..."
 
 dd if=/dev/urandom of=commit_key3.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_key3.txt.dec bs=1 count=$(wc -c < commit_key3.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_key3.txt.dec bs=1 count=$(wc -c < commit_key3.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact committest3 commit_key3.txt commit_key3.txt.dec > /dev/null 2>&1
 
 printf 'window three message' > commit_plainC.txt
@@ -313,7 +313,7 @@ rm -rf .keychain
 echo "     Testing crash recovery on the decrypt side (no message loss)..."
 
 dd if=/dev/urandom of=commit_deckey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_deckey.txt.dec bs=1 count=$(wc -c < commit_deckey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_deckey.txt.dec bs=1 count=$(wc -c < commit_deckey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact decrecover commit_deckey.txt commit_deckey.txt.dec > /dev/null 2>&1
 
 printf 'secret plaintext for decrypt recovery' > commit_decplain.txt
@@ -363,7 +363,7 @@ rm -f commit_decstderr.log commit_decstderr2.log
 echo "     Testing that a redelivery is not reported as success..."
 
 dd if=/dev/urandom of=commit_rdkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_rdkey.txt.dec bs=1 count=$(wc -c < commit_rdkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_rdkey.txt.dec bs=1 count=$(wc -c < commit_rdkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact redeliv commit_rdkey.txt commit_rdkey.txt.dec > /dev/null 2>&1
 
 printf 'first message' > commit_rdfirst.txt
@@ -410,7 +410,7 @@ rm -f commit_rdkey.txt commit_rdfirst.txt commit_rdsecond.txt commit_rdout.bin c
 echo "     Testing that abandoned staging files are swept away..."
 
 dd if=/dev/urandom of=commit_stagekey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_stagekey.txt.dec bs=1 count=$(wc -c < commit_stagekey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_stagekey.txt.dec bs=1 count=$(wc -c < commit_stagekey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact staged commit_stagekey.txt commit_stagekey.txt.dec > /dev/null 2>&1
 
 # Plant staging files of the exact shape a killed process leaves behind
@@ -467,7 +467,7 @@ rm -f commit_stagekey.txt commit_stageout.bin
 echo "     Testing that metadata drifted from the key file self-heals..."
 
 dd if=/dev/urandom of=commit_healkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_healkey.txt.dec bs=1 count=$(wc -c < commit_healkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_healkey.txt.dec bs=1 count=$(wc -c < commit_healkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact healed commit_healkey.txt commit_healkey.txt.dec > /dev/null 2>&1
 
 # Overstate the remaining key: claim 1000 bytes when the file holds 1000
@@ -543,7 +543,7 @@ if [ -w /dev/full ]; then
   echo "     Testing that a failed delivery is detected and recoverable..."
 
   dd if=/dev/urandom of=commit_fullkey.txt bs=1 count=1000 2>/dev/null
-  dd if=/dev/urandom of=commit_fullkey.txt.dec bs=1 count=$(wc -c < commit_fullkey.txt) 2>/dev/null
+  dd if=/dev/urandom of=commit_fullkey.txt.dec bs=1 count=$(wc -c < commit_fullkey.txt | tr -d ' ') 2>/dev/null
   ./bin/otp --add-contact fulldisk commit_fullkey.txt commit_fullkey.txt.dec > /dev/null 2>&1
 
   printf 'this message must survive a full disk' > commit_fullmsg.txt
@@ -594,7 +594,7 @@ fi
 echo "     Testing that an input read error is not mistaken for end-of-input..."
 
 dd if=/dev/urandom of=commit_readkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_readkey.txt.dec bs=1 count=$(wc -c < commit_readkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_readkey.txt.dec bs=1 count=$(wc -c < commit_readkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact readerr commit_readkey.txt commit_readkey.txt.dec > /dev/null 2>&1
 
 mkdir -p commit_notafile
@@ -636,7 +636,7 @@ rm -f commit_readkey.txt commit_readerr.log
 echo "     Testing that staged-write verification catches corruption..."
 
 dd if=/dev/urandom of=commit_vkey.txt bs=1 count=2000 2>/dev/null
-dd if=/dev/urandom of=commit_vkey.txt.dec bs=1 count=$(wc -c < commit_vkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_vkey.txt.dec bs=1 count=$(wc -c < commit_vkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact verifytest commit_vkey.txt commit_vkey.txt.dec > /dev/null 2>&1
 
 # 1. the streamed ciphertext (CRC32 check in commit_stage_close_verified)
@@ -697,7 +697,7 @@ rm -f commit_vkey.txt commit_verr1.log commit_verr2.log
 echo "     Testing that a crash mid-write never exposes a partial file..."
 
 dd if=/dev/urandom of=commit_pkey.txt bs=1 count=2000 2>/dev/null
-dd if=/dev/urandom of=commit_pkey.txt.dec bs=1 count=$(wc -c < commit_pkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_pkey.txt.dec bs=1 count=$(wc -c < commit_pkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact partialtest commit_pkey.txt commit_pkey.txt.dec > /dev/null 2>&1
 
 printf 'crash while rewriting the key' > commit_pmsg.txt
@@ -733,7 +733,7 @@ fi
 
 # Now the .meta half: staged but not published when the process dies
 dd if=/dev/urandom of=commit_mkey.txt bs=1 count=2000 2>/dev/null
-dd if=/dev/urandom of=commit_mkey.txt.dec bs=1 count=$(wc -c < commit_mkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_mkey.txt.dec bs=1 count=$(wc -c < commit_mkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact metapartial commit_mkey.txt commit_mkey.txt.dec > /dev/null 2>&1
 
 printf 'crash after meta staged' > commit_mmsg.txt
@@ -790,7 +790,7 @@ rm -f commit_mkey.txt commit_mmsg.txt commit_mout.bin commit_mexp.bin
 echo "     Testing decrypt-side parity (bounds, resync, delivery)..."
 
 dd if=/dev/urandom of=commit_dkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_dkey.txt.dec bs=1 count=$(wc -c < commit_dkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_dkey.txt.dec bs=1 count=$(wc -c < commit_dkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact decparity commit_dkey.txt commit_dkey.txt.dec > /dev/null 2>&1
 
 # 1. input longer than the remaining decryption key, spanning chunks
@@ -848,7 +848,7 @@ fi
 #    the decryption key bytes are already gone.
 if [ -w /dev/full ]; then
   dd if=/dev/urandom of=commit_dfkey.txt bs=1 count=1000 2>/dev/null
-  dd if=/dev/urandom of=commit_dfkey.txt.dec bs=1 count=$(wc -c < commit_dfkey.txt) 2>/dev/null
+  dd if=/dev/urandom of=commit_dfkey.txt.dec bs=1 count=$(wc -c < commit_dfkey.txt | tr -d ' ') 2>/dev/null
   ./bin/otp --add-contact decfull commit_dfkey.txt commit_dfkey.txt.dec > /dev/null 2>&1
 
   printf 'plaintext that must not be lost' > commit_dfplain.txt
@@ -897,7 +897,7 @@ rm -f commit_derr1.log commit_derr2.log commit_derr3.log
 echo "     Testing recovery from a state matching no known window..."
 
 dd if=/dev/urandom of=commit_ukey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_ukey.txt.dec bs=1 count=$(wc -c < commit_ukey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_ukey.txt.dec bs=1 count=$(wc -c < commit_ukey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact unknownstate commit_ukey.txt commit_ukey.txt.dec > /dev/null 2>&1
 
 printf 'establish some state' | ./bin/otp -c unknownstate --encrypt > /dev/null 2>&1
@@ -954,7 +954,7 @@ rm -f commit_ukey.txt commit_umsg.txt commit_uout.bin commit_uexp.bin commit_uer
 echo "     Testing that duplicate pending artifacts are discarded, not guessed at..."
 
 dd if=/dev/urandom of=commit_xkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_xkey.txt.dec bs=1 count=$(wc -c < commit_xkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_xkey.txt.dec bs=1 count=$(wc -c < commit_xkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact extrapending commit_xkey.txt commit_xkey.txt.dec > /dev/null 2>&1
 
 printf 'first payload'  > ".keychain/extrapending_enc_pending_seq1_off0_len13.bin"
@@ -1003,7 +1003,7 @@ rm -f commit_xkey.txt commit_xmsg.txt commit_xout.bin commit_xexp.bin commit_xer
 echo "     Testing reconciliation when the key file is unreadable..."
 
 dd if=/dev/urandom of=commit_nkey.txt bs=1 count=1000 2>/dev/null
-dd if=/dev/urandom of=commit_nkey.txt.dec bs=1 count=$(wc -c < commit_nkey.txt) 2>/dev/null
+dd if=/dev/urandom of=commit_nkey.txt.dec bs=1 count=$(wc -c < commit_nkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact nokeyfile commit_nkey.txt commit_nkey.txt.dec > /dev/null 2>&1
 
 printf 'orphaned payload' > ".keychain/nokeyfile_enc_pending_seq1_off0_len16.bin"
@@ -1142,7 +1142,7 @@ if [ "$(id -u)" != "0" ]; then
   echo "     Testing that I/O failures during commit are caught..."
 
   dd if=/dev/urandom of=commit_iokey.txt bs=1 count=1000 2>/dev/null
-  dd if=/dev/urandom of=commit_iokey.txt.dec bs=1 count=$(wc -c < commit_iokey.txt) 2>/dev/null
+  dd if=/dev/urandom of=commit_iokey.txt.dec bs=1 count=$(wc -c < commit_iokey.txt | tr -d ' ') 2>/dev/null
   ./bin/otp --add-contact iofail commit_iokey.txt commit_iokey.txt.dec > /dev/null 2>&1
 
   # 1. the contact lock cannot be created at all
