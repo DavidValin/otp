@@ -34,12 +34,16 @@
 #define mkdir(path, mode) _mkdir(path)
 #define unlink(path) _unlink(path)
 #define stat _stat
+/* MinGW's <sys/stat.h> already defines these; MSVC's does not */
+#ifndef S_ISREG
 #define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#ifndef S_ISDIR
 #define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#endif
 #define PATH_SEPARATOR '\\'
 #define PATH_SEPARATOR_STR "\\"
 #define getpid _getpid
-#define fsync _commit
 #define O_BINARY_FLAG _O_BINARY
 #ifndef _MSC_VER
 #define fileno _fileno
@@ -138,7 +142,7 @@ static int copy_key_file(const char *src_path, const char *dst_path)
   int read_failed = ferror(src);
   fclose(src);
 
-  if (read_failed || fflush(dst) != 0 || fsync(fileno(dst)) != 0)
+  if (read_failed || fflush(dst) != 0 || otp_fsync(fileno(dst)) != 0)
   {
     fprintf(stderr, "Error: Failed to store key file '%s': %s\n", dst_path, strerror(errno));
     fclose(dst);
@@ -612,7 +616,7 @@ static int spent_head_record(const char *keychain_dir, const char *direction,
   int rc = 0;
   if (fprintf(f, "v1 %s %016llx %016llx\n", direction,
               (unsigned long long)roll, (unsigned long long)confirm) < 0 ||
-      fflush(f) != 0 || fsync(fileno(f)) != 0)
+      fflush(f) != 0 || otp_fsync(fileno(f)) != 0)
     rc = -1;
   if (fclose(f) != 0)
     rc = -1;
@@ -1280,21 +1284,29 @@ static int add_contact_with_keys_locked(const char *name, const char *encryption
     return -1;
   }
 
-  size_t enc_size = (size_t)enc_size_64;
-  size_t dec_size = (size_t)dec_size_64;
+  // Validate on the 64-bit sizes BEFORE narrowing to size_t: on a 32-bit
+  // platform the cast itself truncates, so checking afterwards would let
+  // an oversized key wrap around and slip past with a bogus small size.
+  // On such platforms size_t's own range is the effective ceiling.
+  unsigned long long max_key = MAX_KEY_SIZE;
+  if ((unsigned long long)SIZE_MAX < max_key)
+    max_key = (unsigned long long)SIZE_MAX;
 
-  if (enc_size > MAX_KEY_SIZE)
+  if (enc_size_64 > max_key)
   {
     fprintf(stderr, "Error: Encryption key file too large (max %llu bytes)\n",
-            (unsigned long long)MAX_KEY_SIZE);
+            max_key);
     return -1;
   }
-  if (dec_size > MAX_KEY_SIZE)
+  if (dec_size_64 > max_key)
   {
     fprintf(stderr, "Error: Decryption key file too large (max %llu bytes)\n",
-            (unsigned long long)MAX_KEY_SIZE);
+            max_key);
     return -1;
   }
+
+  size_t enc_size = (size_t)enc_size_64;
+  size_t dec_size = (size_t)dec_size_64;
   if (enc_size == 0 || dec_size == 0)
   {
     fprintf(stderr, "Error: Key files cannot be empty\n");
@@ -1388,10 +1400,25 @@ static int add_contact_with_keys_locked(const char *name, const char *encryption
       if (their_size == 0)
         continue; // fully consumed - nothing left to overlap with
 
+      // A key too large for this build's size_t (possible when a keychain
+      // written by a 64-bit build is opened by a 32-bit one) cannot be
+      // compared without truncating it, which could hide an overlap - so
+      // refuse to add, same as any other unverifiable-overlap failure.
+      size_t their_size_sz;
+      if (otp_size_to_size_t(their_size, &their_size_sz) != 0)
+      {
+        fprintf(stderr,
+                "Error: contact '%s's %s key is too large for this build to rule out shared "
+                "key material with the new contact. Refusing to add rather than risk "
+                "installing an already-installed pad.\n",
+                other->Name, theirs[t].word);
+        return -1;
+      }
+
       for (int cnd = 0; cnd < 2; cnd++)
       {
         KeyOverlap cross = key_files_overlap(cands[cnd].path, theirs[t].path,
-                                             cands[cnd].size, (size_t)their_size);
+                                             cands[cnd].size, their_size_sz);
         if (cross == KEY_OVERLAP_UNKNOWN)
         {
           fprintf(stderr,
@@ -1985,7 +2012,15 @@ static int resync_key_size(const char *direction, const char *contact_name,
             direction, key_path, contact_name, strerror(errno));
     return -1;
   }
-  size_t actual = (size_t)actual_64;
+  size_t actual;
+  if (otp_size_to_size_t(actual_64, &actual) != 0)
+  {
+    // Can only happen on a 32-bit build opening a keychain written by a
+    // 64-bit one; truncating would fake a key-shrunk/key-grown verdict.
+    fprintf(stderr, "Error: %s key file '%s' for contact '%s' is too large for this build\n",
+            direction, key_path, contact_name);
+    return -1;
+  }
 
   if (actual == *declared_size)
     return 0;

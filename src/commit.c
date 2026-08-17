@@ -22,7 +22,6 @@
 #ifdef _WIN32
 #include <io.h>
 #define O_BINARY_FLAG _O_BINARY
-#define fsync _commit
 #define unlink _unlink
 #ifndef _MSC_VER
 /* Map the POSIX spellings this file uses onto the CRT's underscore names.
@@ -116,7 +115,7 @@ static void fsync_parent_dir(const char *path)
   int dfd = open(dir, O_RDONLY);
   if (dfd >= 0)
   {
-    fsync(dfd);
+    otp_fsync(dfd);
     close(dfd);
   }
 #else
@@ -150,7 +149,7 @@ int commit_write_verified(const char *tmp_path, const unsigned char *data, size_
     unlink(tmp_path);
     return -1;
   }
-  if (fflush(f) != 0 || fsync(fileno(f)) != 0)
+  if (fflush(f) != 0 || otp_fsync(fileno(f)) != 0)
   {
     fprintf(stderr, "Error: failed to fsync %s: %s\n", tmp_path, strerror(errno));
     fclose(f);
@@ -237,7 +236,7 @@ int commit_stage_write(CommitStage *stage, const unsigned char *data, size_t len
 
 int commit_stage_close_verified(CommitStage *stage)
 {
-  if (fflush(stage->f) != 0 || fsync(fileno(stage->f)) != 0)
+  if (fflush(stage->f) != 0 || otp_fsync(fileno(stage->f)) != 0)
   {
     fprintf(stderr, "Error: failed to fsync staging file %s: %s\n", stage->tmp_path, strerror(errno));
     fclose(stage->f);
@@ -469,7 +468,19 @@ int commit_reconcile(const char *keychain_dir, const char *contact,
     out->action = COMMIT_RECOVER_BLOCKED;
     return -1;
   }
-  size_t actual_key_size = (size_t)key_size_64;
+  size_t actual_key_size;
+  if (otp_size_to_size_t(key_size_64, &actual_key_size) != 0)
+  {
+    /* Same fail-closed treatment as an unreadable key file: a size too
+     * large for this build's size_t (32-bit build, >4GB key) cannot be
+     * reconciled without truncating it. Keep the artifact and abort. */
+    fprintf(stderr,
+            "Warning: key file %s is too large for this build to reconcile %s - "
+            "keeping the pending artifact\n",
+            key_file_path, found_path);
+    out->action = COMMIT_RECOVER_BLOCKED;
+    return -1;
+  }
 
   out->sequence = found_seq;
   out->range_offset = found_offset;

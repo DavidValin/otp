@@ -37,16 +37,13 @@
  *   on a crash or kill, so no Windows-specific stale-lock handling is       *
  *   needed anywhere that already assumes POSIX flock()'s crash behavior.    *
  *                                                                           *
- *   Verification note: no Windows/mingw toolchain was available while       *
- *   writing this, so it has not been built or run on actual Windows. The    *
- *   Windows branch below, together with the Windows branches of commit.c    *
- *   and keychain.c, was compiled in isolation (gcc -D_WIN32 -Wall -Wextra,  *
- *   warning-free) against stub headers whose declarations match the real    *
- *   Win32 and CRT signatures (FindFirstFileA, LockFileEx, MoveFileExA,      *
- *   _stat64, _fseeki64, ...), exercised the same way commit.c and           *
- *   keychain.c actually call them - which catches type and argument-order   *
- *   mistakes and missing declarations, but is not a substitute for a real   *
- *   Windows build and test run. Treat this as reviewed, not field-tested.   *
+ *   Verification note: the full codebase (all Windows branches included)    *
+ *   cross-compiles warning-free with real MinGW-w64 toolchains against the  *
+ *   real Win32 and CRT headers - both x86_64-w64-mingw32-gcc and            *
+ *   i686-w64-mingw32-gcc, -Wall -Wextra ("make mingw" runs the 64-bit       *
+ *   one). That catches type, signature and missing-declaration mistakes,    *
+ *   but the resulting otp.exe has not been run on actual Windows: treat     *
+ *   the Windows side as compile-verified, not field-tested.                 *
  *                                                                           *
  *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com          *
  *   License: Apache 2.0                                                     *
@@ -210,6 +207,13 @@ static inline FILE *otp_open_tty(void)
   return fopen("CONIN$", "r");
 }
 
+/* Flush a file descriptor's data to stable storage. _commit() is the CRT
+ * call that hands the OS write-through request for the file's buffers. */
+static inline int otp_fsync(int fd)
+{
+  return _commit(fd);
+}
+
 #else /* POSIX: real, unmodified system headers - no behavior change here */
 
 #include <dirent.h>
@@ -217,6 +221,8 @@ static inline FILE *otp_open_tty(void)
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /* POSIX rename() already replaces an existing destination atomically, and
  * off_t is 64-bit here because both translation units define
@@ -241,6 +247,24 @@ static inline int otp_fseek(FILE *f, unsigned long long offset)
   return fseeko(f, (off_t)offset, SEEK_SET);
 }
 
+/* Flush a file descriptor's data to stable storage. On macOS fsync()
+ * only pushes data to the drive - it does not force the drive to commit
+ * its own cache to physical media, so a power loss right after a
+ * "successful" fsync can still lose the write. F_FULLFSYNC is Apple's
+ * documented way to ask for the full flush; it can fail on filesystems
+ * that don't support it (SMB mounts, some externals), where plain
+ * fsync() is the best available and matches other-POSIX behavior. */
+static inline int otp_fsync(int fd)
+{
+#ifdef __APPLE__
+  if (fcntl(fd, F_FULLFSYNC) != -1)
+    return 0;
+  return fsync(fd);
+#else
+  return fsync(fd);
+#endif
+}
+
 /* See the Windows branch: the answer to an interactive confirmation must
  * come from the terminal, never from stdin, which carries the message
  * payload. NULL means "no terminal available", which callers must treat
@@ -251,5 +275,22 @@ static inline FILE *otp_open_tty(void)
 }
 
 #endif /* _WIN32 */
+
+#include <stdint.h>
+
+/* Narrow a 64-bit file size into a size_t, refusing - rather than
+ * silently truncating - when it does not fit. Only 32-bit builds can
+ * take the failure path (SIZE_MAX there is 4GB-1); on 64-bit builds the
+ * check never fires. The limit is held in a variable rather than
+ * compared as a constant so 64-bit compiles don't flag the comparison
+ * as always-false (-Wtype-limits). */
+static inline int otp_size_to_size_t(unsigned long long v, size_t *out)
+{
+  unsigned long long limit = (unsigned long long)SIZE_MAX;
+  if (v > limit)
+    return -1;
+  *out = (size_t)v;
+  return 0;
+}
 
 #endif /* OTP_PLATFORM_H */

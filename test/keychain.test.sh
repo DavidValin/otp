@@ -33,14 +33,14 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - add contact succeeded"
 else
   echo "     ! ${RED}FAIL${NC} - add contact failed"
-  exit -1
+  exit 1
 fi
 
 if test -f ".keychain/alice.meta"; then
   echo "     - ${GREEN}PASS${NC} - per-contact metadata file .keychain/alice.meta was created"
 else
   echo "     ! ${RED}FAIL${NC} - .keychain/alice.meta was NOT created"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -54,7 +54,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - has contact found alice"
 else
   echo "     ! ${RED}FAIL${NC} - has contact did not find alice"
-  exit -1
+  exit 1
 fi
 
 ./bin/otp --has-contact bob > /dev/null
@@ -62,7 +62,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - has contact correctly reports bob doesn't exist"
 else
   echo "     ! ${RED}FAIL${NC} - has contact incorrectly found bob"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -77,7 +77,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - list contacts shows alice"
 else
   echo "     ! ${RED}FAIL${NC} - list contacts does not show alice"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -101,7 +101,7 @@ if [ $ALICE_FOUND -eq 0 ] && [ $BOB_FOUND -eq 0 ] && [ $CHARLIE_FOUND -eq 0 ]; t
   echo "     - ${GREEN}PASS${NC} - list contacts shows all three contacts"
 else
   echo "     ! ${RED}FAIL${NC} - list contacts missing some contacts"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -116,7 +116,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - show contact displays alice"
 else
   echo "     ! ${RED}FAIL${NC} - show contact does not display alice correctly"
-  exit -1
+  exit 1
 fi
 
 # Check that keys are masked
@@ -125,7 +125,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - show contact masks keys"
 else
   echo "     ! ${RED}FAIL${NC} - show contact does not mask keys"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -139,7 +139,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - remove contact succeeded"
 else
   echo "     ! ${RED}FAIL${NC} - remove contact failed"
-  exit -1
+  exit 1
 fi
 
 ./bin/otp --has-contact bob > /dev/null
@@ -147,7 +147,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - bob was successfully removed"
 else
   echo "     ! ${RED}FAIL${NC} - bob still exists after removal"
-  exit -1
+  exit 1
 fi
 
 # Verify alice and charlie still exist
@@ -160,7 +160,7 @@ if [ $ALICE_EXISTS -eq 0 ] && [ $CHARLIE_EXISTS -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - other contacts remain after removal"
 else
   echo "     ! ${RED}FAIL${NC} - other contacts were incorrectly affected"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -174,7 +174,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - duplicate contact correctly rejected"
 else
   echo "     ! ${RED}FAIL${NC} - duplicate contact was allowed"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -189,7 +189,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - short option -ac and -hc work"
 else
   echo "     ! ${RED}FAIL${NC} - short options don't work"
-  exit -1
+  exit 1
 fi
 
 OUTPUT=$(./bin/otp -lc)
@@ -198,7 +198,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - short option -lc works"
 else
   echo "     ! ${RED}FAIL${NC} - short option -lc doesn't work"
-  exit -1
+  exit 1
 fi
 
 OUTPUT=$(./bin/otp -sc dave)
@@ -207,7 +207,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - short option -sc works"
 else
   echo "     ! ${RED}FAIL${NC} - short option -sc doesn't work"
-  exit -1
+  exit 1
 fi
 
 ./bin/otp -rc dave > /dev/null
@@ -215,7 +215,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - short option -rc works"
 else
   echo "     ! ${RED}FAIL${NC} - short option -rc doesn't work"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -235,7 +235,7 @@ if [ $ALICE_IN_FILE -eq 0 ] && [ $CHARLIE_IN_FILE -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - contacts persisted to their own metadata files"
 else
   echo "     ! ${RED}FAIL${NC} - contacts not properly persisted"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -252,7 +252,7 @@ rm tmpkey
 # Verify key files were created
 if [ ! -f "encryption_testalice.txt" ] || [ ! -f "decryption_testalice.txt" ]; then
   echo "     ! ${RED}FAIL${NC} - key pair generation failed"
-  exit -1
+  exit 1
 fi
 
 # Add contact with keys
@@ -261,7 +261,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - add contact with keys succeeded"
 else
   echo "     ! ${RED}FAIL${NC} - add contact with keys failed"
-  exit -1
+  exit 1
 fi
 
 # Verify contact was added
@@ -270,7 +270,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - contact with keys exists"
 else
   echo "     ! ${RED}FAIL${NC} - contact with keys was not added"
-  exit -1
+  exit 1
 fi
 
 # Verify keys were loaded
@@ -284,7 +284,7 @@ if [ $ENC_KEY_LOADED -eq 0 ] && [ $DEC_KEY_LOADED -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - keys were loaded correctly"
 else
   echo "     ! ${RED}FAIL${NC} - keys were not loaded properly"
-  exit -1
+  exit 1
 fi
 
 # Test that key size is correct (1MB = 1048576 bytes)
@@ -293,7 +293,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - encryption key size is correct"
 else
   echo "     ! ${RED}FAIL${NC} - encryption key size is incorrect"
-  exit -1
+  exit 1
 fi
 
 echo "$OUTPUT" | grep -q "DecryptionKey: \*\*\*\*\*\*\* (1048576 bytes)"
@@ -301,7 +301,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - decryption key size is correct"
 else
   echo "     ! ${RED}FAIL${NC} - decryption key size is incorrect"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -327,7 +327,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - encryption with contact succeeded"
 else
   echo "     ! ${RED}FAIL${NC} - encryption with contact failed"
-  exit -1
+  exit 1
 fi
 
 # Verify cipher text is not the same as plain text (compare file sizes or content)
@@ -335,7 +335,7 @@ if ! diff -q test_plain.txt test_cipher.bin > /dev/null 2>&1; then
   echo "     - ${GREEN}PASS${NC} - cipher text differs from plain text"
 else
   echo "     ! ${RED}FAIL${NC} - cipher text same as plain text"
-  exit -1
+  exit 1
 fi
 
 # Verify key offset was updated
@@ -345,7 +345,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - encryption key offset updated correctly"
 else
   echo "     ! ${RED}FAIL${NC} - encryption key offset not updated correctly"
-  exit -1
+  exit 1
 fi
 
 # Verify sequence was incremented
@@ -354,7 +354,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - sequence incremented correctly"
 else
   echo "     ! ${RED}FAIL${NC} - sequence not incremented"
-  exit -1
+  exit 1
 fi
 
 # Verify LastMessageSentAt was set
@@ -363,7 +363,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - LastMessageSentAt timestamp set"
 else
   echo "     ! ${RED}FAIL${NC} - LastMessageSentAt not set"
-  exit -1
+  exit 1
 fi
 
 # Verify remaining key size
@@ -373,7 +373,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - remaining encryption key size correct"
 else
   echo "     ! ${RED}FAIL${NC} - remaining encryption key size incorrect"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -392,7 +392,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - decryption with contact succeeded"
 else
   echo "     ! ${RED}FAIL${NC} - decryption with contact failed"
-  exit -1
+  exit 1
 fi
 
 # Verify decrypted text matches original
@@ -403,7 +403,7 @@ else
   cat test_plain.txt
   echo "---"
   cat test_decrypted.txt
-  exit -1
+  exit 1
 fi
 
 # Verify decryption key offset was updated
@@ -413,7 +413,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - decryption key offset updated correctly"
 else
   echo "     ! ${RED}FAIL${NC} - decryption key offset not updated correctly"
-  exit -1
+  exit 1
 fi
 
 # Verify LastMessageReceivedAt was set
@@ -422,7 +422,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - LastMessageReceivedAt timestamp set"
 else
   echo "     ! ${RED}FAIL${NC} - LastMessageReceivedAt not set"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -436,7 +436,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - error on nonexistent contact"
 else
   echo "     ! ${RED}FAIL${NC} - should error on nonexistent contact"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -449,7 +449,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - error on empty encryption key"
 else
   echo "     ! ${RED}FAIL${NC} - should error on empty encryption key"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -467,7 +467,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - error when message exceeds key size"
 else
   echo "     ! ${RED}FAIL${NC} - should error when message exceeds key size"
-  exit -1
+  exit 1
 fi
 
 # Verify keychain was not modified (sequence should still be 0)
@@ -477,7 +477,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - keychain not modified on error"
 else
   echo "     ! ${RED}FAIL${NC} - keychain was modified on error"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -510,7 +510,7 @@ if [ $RC -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - error when multi-chunk message exceeds key size"
 else
   echo "     ! ${RED}FAIL${NC} - should error when multi-chunk message exceeds key size"
-  exit -1
+  exit 1
 fi
 
 # Critical check: a failed attempt must not have emitted ANY ciphertext to
@@ -523,7 +523,7 @@ if [ "$PARTIAL_SIZE" = "0" ]; then
   echo "     - ${GREEN}PASS${NC} - no partial ciphertext leaked to output on failure"
 else
   echo "     ! ${RED}FAIL${NC} - $PARTIAL_SIZE bytes of ciphertext leaked to output despite failure (key reuse risk)"
-  exit -1
+  exit 1
 fi
 
 # Key material must be completely untouched by the failed attempt
@@ -533,7 +533,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - sequence not incremented after multi-chunk failure"
 else
   echo "     ! ${RED}FAIL${NC} - sequence incremented after multi-chunk failure (key was consumed)"
-  exit -1
+  exit 1
 fi
 
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 0"
@@ -541,7 +541,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - encryption key offset unchanged after multi-chunk failure"
 else
   echo "     ! ${RED}FAIL${NC} - encryption key offset advanced after multi-chunk failure (key bytes leaked)"
-  exit -1
+  exit 1
 fi
 
 # Encrypt a small message that fits within the key. If the earlier failed
@@ -559,7 +559,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - key material was not leaked or desynced by the failed multi-chunk attempt"
 else
   echo "     ! ${RED}FAIL${NC} - encrypted output does not match expected ciphertext (key was reused/desynced)"
-  exit -1
+  exit 1
 fi
 
 rm -f multichunk_key.txt multichunk_key_prefix.txt bigmsg.txt smallmsg.txt multichunk_partial_output.bin
@@ -574,7 +574,7 @@ if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - error when missing --encrypt/--decrypt flag"
 else
   echo "     ! ${RED}FAIL${NC} - should error when missing --encrypt/--decrypt flag"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------
@@ -594,7 +594,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - sequence incremented on second operation"
 else
   echo "     ! ${RED}FAIL${NC} - sequence not incremented correctly on second operation"
-  exit -1
+  exit 1
 fi
 
 # Verify offset increased by the second message length
@@ -604,7 +604,7 @@ if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - offset updated correctly after multiple operations"
 else
   echo "     ! ${RED}FAIL${NC} - offset not updated correctly after multiple operations"
-  exit -1
+  exit 1
 fi
 
 # -----------------------------------------------------------------------------

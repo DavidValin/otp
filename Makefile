@@ -70,6 +70,18 @@ musl:
 	@echo " - Tested!"
 	@echo
 
+# Cross-compile a Windows binary with MinGW-w64 (the native Windows build
+# above uses cl). Also serves as the Windows-compatibility check on a
+# POSIX machine: it compiles every Windows branch against the real Win32
+# and CRT headers with all warnings on.
+mingw:
+	@echo
+	@echo " - Cross-compiling Windows binary with MinGW-w64..."
+	@mkdir -p bin
+	@x86_64-w64-mingw32-gcc -Wall -Wextra -O2 -o bin/otp.exe src/otp.c src/keychain.c src/commit.c
+	@echo " - Built bin/otp.exe!"
+	@echo
+
 install-musl:
 	@echo
 	@echo " - Installing musl binary..."

@@ -70,14 +70,21 @@
 /* flock()/LOCK_EX come from platform.h's LockFileEx-backed shim, so the
  * direct key-file mode gets the same locking guarantee on Windows as on
  * POSIX. */
-#ifndef _MSC_VER
-struct stat;
-#endif
-/* Map POSIX names to the CRT's underscore spellings */
+/* Map POSIX names to the CRT's underscore spellings. fstat maps to the
+ * explicitly 64-bit _fstat64 (with its matching struct) rather than
+ * _fstat, whose st_size is a 32-bit long even in 64-bit builds and would
+ * silently misreport keys larger than 2GB. */
 #define close _close
 #define open _open
-#define fstat _fstat
+#define fstat _fstat64
+#define stat64_t struct _stat64
 #define getpid _getpid
+#ifndef S_ISREG
+/* MinGW defines S_ISREG; MSVC's <sys/stat.h> does not */
+#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
+#endif
+#else
+#define stat64_t struct stat
 #endif
 #ifndef O_BINARY
 #define O_BINARY 0
@@ -147,7 +154,11 @@ int main(int argc, char *argv[])
   _setmode(_fileno(stdout), _O_BINARY);
 #endif
 
-  optind = 1;
+  /* Index of the key-file argument in direct key-file mode. This was
+   * previously the getopt global `optind`, but getopt() is never called
+   * here and <unistd.h> (its only declaration) does not exist on
+   * Windows, so it is a plain local now. */
+  const int key_arg = 1;
 
   /* **************************************************************************
    *  Handles -h (--help) command                                             *
@@ -443,7 +454,7 @@ int main(int argc, char *argv[])
 
   snprintf(outfileunused, sizeof outfileunused,
            "%s.%04d-%02d-%02d_%02d-%02d-%02d.next",
-           argv[optind],
+           argv[key_arg],
            tm_struct.tm_year + 1900, tm_struct.tm_mon + 1, tm_struct.tm_mday,
            tm_struct.tm_hour, tm_struct.tm_min, tm_struct.tm_sec);
   /* Ensure unique output file atomically (O_CREAT|O_EXCL) */
@@ -467,7 +478,7 @@ int main(int argc, char *argv[])
   int key_fd = -1;
   size_t key_size = 0;
   size_t used = 0;
-  struct stat ks;
+  stat64_t ks;
 
   unused = fdopen(out_fd, "wb");
   if (!unused)
@@ -478,40 +489,46 @@ int main(int argc, char *argv[])
   }
 
   /* Open and lock key file */
-  key_fd = open(argv[optind], O_RDONLY | O_BINARY);
+  key_fd = open(argv[key_arg], O_RDONLY | O_BINARY);
   if (key_fd < 0)
   {
-    fprintf(stderr, "Error opening key file %s: %s\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error opening key file %s: %s\n", argv[key_arg], strerror(errno));
     goto fail;
   }
   if (flock(key_fd, LOCK_EX) < 0)
   {
-    fprintf(stderr, "Error locking key file %s: %s\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error locking key file %s: %s\n", argv[key_arg], strerror(errno));
     close(key_fd);
     goto fail;
   }
   infile = fdopen(key_fd, "rb");
   if (!infile)
   {
-    fprintf(stderr, "Error reading key file %s: %s\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error reading key file %s: %s\n", argv[key_arg], strerror(errno));
     close(key_fd);
     goto fail;
   }
   /* Determine key file size */
   if (fstat(key_fd, &ks) < 0)
   {
-    fprintf(stderr, "Error statting key file %s: %s\n", argv[optind], strerror(errno));
+    fprintf(stderr, "Error statting key file %s: %s\n", argv[key_arg], strerror(errno));
     goto fail;
   }
   if (!S_ISREG(ks.st_mode))
   {
-    fprintf(stderr, "%s is not a regular file\n", argv[optind]);
+    fprintf(stderr, "%s is not a regular file\n", argv[key_arg]);
     goto fail;
   }
-  key_size = ks.st_size;
+  /* Refuse rather than truncate on a 32-bit build: a silently narrowed
+   * size would make the key look shorter than it is. */
+  if (otp_size_to_size_t((unsigned long long)ks.st_size, &key_size) != 0)
+  {
+    fprintf(stderr, "Key file %s is too large for this build\n", argv[key_arg]);
+    goto fail;
+  }
   if (key_size == 0)
   {
-    fprintf(stderr, "Key file %s is empty\n", argv[optind]);
+    fprintf(stderr, "Key file %s is empty\n", argv[key_arg]);
     goto fail;
   }
   /* Read key into memory */
@@ -523,7 +540,7 @@ int main(int argc, char *argv[])
   }
   if (fread(keybuf, 1, key_size, infile) != key_size)
   {
-    fprintf(stderr, "Error reading key file %s\n", argv[optind]);
+    fprintf(stderr, "Error reading key file %s\n", argv[key_arg]);
     goto fail;
   }
   /* Handle empty stdin early */
@@ -542,14 +559,18 @@ int main(int argc, char *argv[])
   }
   /* Put the byte back for normal processing */
   ungetc(first, stdin);
-  /* Ignore SIGPIPE to handle closed pipes gracefully */
+#ifndef _WIN32
+  /* Ignore SIGPIPE to handle closed pipes gracefully. Windows has no
+   * SIGPIPE at all: a write to a closed pipe just fails, which the
+   * fwrite error checks below already handle on both platforms. */
   signal(SIGPIPE, SIG_IGN);
+#endif
   unsigned char outbyte;
   while (fread(&outbyte, 1, 1, stdin) == 1)
   {
     if (used >= key_size)
     {
-      fprintf(stderr, "Error: key file %s shorter than input.\n", argv[optind]);
+      fprintf(stderr, "Error: key file %s shorter than input.\n", argv[key_arg]);
       goto fail;
     }
     /* Encrypt current byte using key */
