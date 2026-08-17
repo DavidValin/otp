@@ -79,9 +79,15 @@
 #define otp_stdout_is_tty() otp_isatty(stdout)
 
 /* ANSI colors for the key-pair generation report; emitted only when
- * stdout is a terminal. */
+ * stdout is a terminal. OTP_BLACK_ON_WHITE sets foreground and
+ * background together as a palette pair (30 + 47) rather than either
+ * one alone or an absolute RGB: terminal themes remap palette colors
+ * but keep 30 dark and 47 light, so the pair stays readable in any
+ * theme - whereas setting only the background would render the dark
+ * themes' near-white default text on a white bar. */
 #define OTP_GREEN "\x1b[32m"
 #define OTP_YELLOW "\x1b[33m"
+#define OTP_BLACK_ON_WHITE "\x1b[30;47m"
 #define OTP_RESET "\x1b[0m"
 
 /* --new-key-pair writes four files, two per party, each pair inside its
@@ -182,7 +188,46 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
   {
-    puts("\n\n otp 1.3.1 - www.davidvalin.com\n\nThis program takes stdin, xor's it with one-time-pad key material held in a keychain of contacts, and outputs the result to stdout. Consumed key material is destroyed automatically so it can never be reused.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file.\n\n");
+    /* Command parameter signatures are highlighted in yellow, terminal
+     * only - redirected help output stays plain text, like every other
+     * colored output here. Each description renders on its own line
+     * below its parameters. */
+    const char *hl = otp_stdout_is_tty() ? OTP_YELLOW : "";
+    const char *rs = otp_stdout_is_tty() ? OTP_RESET : "";
+    static const char *cmds[][2] = {
+        {"--add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)",
+         "Add a contact to the keychain (optionally with key files)"},
+        {"--remove-contact <name> (or -rc)",
+         "Remove a contact from the keychain"},
+        {"--has-contact <name> (or -hc)",
+         "Check if a contact exists"},
+        {"--list-contacts (or -lc)",
+         "List all contacts"},
+        {"--show-contact <name> (or -sc)",
+         "Show contact details"},
+        {"--contact <name> --encrypt (or -c)",
+         "Encrypt using contact's encryption key"},
+        {"--contact <name> --decrypt (or -c)",
+         "Decrypt using contact's decryption key"},
+        {"--encrypt",
+         "Encrypt stdin to stdout, consuming the contact's encryption key; must accompany --contact <name> (or -c)"},
+        {"--decrypt",
+         "Decrypt stdin to stdout, consuming the contact's decryption key; must accompany --contact <name> (or -c)"},
+        {"-y (or --assume-delivered)",
+         "Skip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available."},
+    };
+    /* Banner: the title as a black-on-white chip, one space of padding
+     * inside the highlight on each side, flush against the left edge.
+     * Piped output gets the plain line instead. */
+    printf("\n\n");
+    if (otp_stdout_is_tty())
+      printf("%s otp v1.3.1 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
+    else
+      puts("otp v1.3.1 - One Time Pad toolkit");
+    puts("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:");
+    for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
+      printf("  %s%s%s\n\t%s\n", hl, cmds[i][0], rs, cmds[i][1]);
+    puts("\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file.\n");
     return 0;
   }
 
