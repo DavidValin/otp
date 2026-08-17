@@ -20,12 +20,24 @@ sudo make install
 
 ## New key pair generation
 
-Use the `-nk` or `--new-key-pair` flag to generate a new key pair from a source of randomness. Each party receives 2 keys, an encryption key (used for sending messages) and a decryption key (used to receive messages).
+Use the `-nk` or `--new-key-pair` flag to generate a new key pair from a source of randomness. Each party receives 2 keys, an encryption key (used for sending messages) and a decryption key (used to receive messages). Each party's pair is written into its own directory, `<name>_keys/`, ready to hand over as one unit, and each file is named for the correspondent it is used with:
+
+```
+alice_keys/
+   encryption_for_bob.key     <-- the key Alice uses to encrypt messages sent to Bob
+   decryption_from_bob.key    <-- the key Alice uses to decrypt messages received from Bob
+
+bob_keys/
+   encryption_for_alice.key   <-- the key Bob uses to encrypt messages sent to Alice
+   decryption_from_alice.key  <-- the key Bob uses to decrypt messages received from Alice
+```
 
 Example (generates 2 key pairs of 1MB length, one pair for each party)
 ```
 cat /dev/urandom | otp --new-key-pair 1 alice bob
 ```
+
+The key material is read from **stdin**, so the randomness source must be piped in. Run without a pipe (stdin on a terminal) the command refuses immediately - before creating any directory or file - rather than sit waiting for megabytes of typed input.
 
 ### The roles are inverted between the two parties
 
@@ -37,32 +49,32 @@ This is the single most important thing to understand about generation, and gett
    two random keys           written out as four files, with the roles crossed
    ───────────────           ──────────────────────────────────────────────────
 
-                        ┌──►  encryption_alice.txt   Alice ENCRYPTS with Key 1
+                        ┌──►  alice_keys/encryption_for_bob.key     Alice ENCRYPTS with Key 1
       Key 1 ────────────┤
-                        └──►  decryption_bob.txt     Bob DECRYPTS with Key 1
+                        └──►  bob_keys/decryption_from_alice.key    Bob DECRYPTS with Key 1
 
-                        ┌──►  encryption_bob.txt     Bob ENCRYPTS with Key 2
+                        ┌──►  bob_keys/encryption_for_alice.key     Bob ENCRYPTS with Key 2
       Key 2 ────────────┤
-                        └──►  decryption_alice.txt   Alice DECRYPTS with Key 2
+                        └──►  alice_keys/decryption_from_bob.key    Alice DECRYPTS with Key 2
 ```
 
-So `encryption_alice.txt` and `decryption_bob.txt` are **byte-identical** - they are the same Key 1 under two different names. Likewise `encryption_bob.txt` and `decryption_alice.txt` are both Key 2. That inversion is the entire mechanism: Alice encrypts with Key 1, and Bob can read it because his decryption key *is* Key 1.
+So `alice_keys/encryption_for_bob.key` and `bob_keys/decryption_from_alice.key` are **byte-identical** - they are the same Key 1 under two different names. Likewise `bob_keys/encryption_for_alice.key` and `alice_keys/decryption_from_bob.key` are both Key 2. That inversion is the entire mechanism: Alice encrypts with Key 1, and Bob can read it because his decryption key *is* Key 1.
 
-The four files are named after their **owner**, not their peer. Each party takes the two files bearing their own name:
+The two directories are named after their **owner**; the files inside are named after the **peer** they are used with. Each party takes the whole directory bearing their own name:
 
 | Party | Takes | Which is | Used for |
 |---|---|---|---|
-| Alice | `encryption_alice.txt` | Key 1 | encrypting messages she sends to Bob |
-| Alice | `decryption_alice.txt` | Key 2 | decrypting messages she receives from Bob |
-| Bob | `encryption_bob.txt` | Key 2 | encrypting messages he sends to Alice |
-| Bob | `decryption_bob.txt` | Key 1 | decrypting messages he receives from Alice |
+| Alice | `alice_keys/encryption_for_bob.key` | Key 1 | encrypting messages she sends to Bob |
+| Alice | `alice_keys/decryption_from_bob.key` | Key 2 | decrypting messages she receives from Bob |
+| Bob | `bob_keys/encryption_for_alice.key` | Key 2 | encrypting messages he sends to Alice |
+| Bob | `bob_keys/decryption_from_alice.key` | Key 1 | decrypting messages he receives from Alice |
 
-Give Alice the files named `*_bob.txt` by mistake and both parties will encrypt with the key the other is also encrypting with - every message will decrypt to garbage, and worse, the same key range will be consumed twice for two different messages, breaking the pad. Verify with `cmp` before distributing:
+Give Alice the `bob_keys/` directory by mistake and both parties will encrypt with the key the other is also encrypting with - every message will decrypt to garbage, and worse, the same key range will be consumed twice for two different messages, breaking the pad. Verify with `cmp` before distributing:
 
 ```bash
-cmp encryption_alice.txt decryption_bob.txt   # must be identical
-cmp encryption_bob.txt decryption_alice.txt   # must be identical
-cmp encryption_alice.txt encryption_bob.txt   # must DIFFER
+cmp alice_keys/encryption_for_bob.key bob_keys/decryption_from_alice.key   # must be identical
+cmp bob_keys/encryption_for_alice.key alice_keys/decryption_from_bob.key   # must be identical
+cmp alice_keys/encryption_for_bob.key bob_keys/encryption_for_alice.key    # must DIFFER
 ```
 
 See [Two keys per contact](#two-keys-per-contact-mirrored-between-the-two-parties) for why the roles are split this way.
@@ -268,7 +280,7 @@ Everything `otp` creates itself is mode `0600` (and the `.keychain/` directory `
 | Mode | Files created | Where |
 |---|---|---|
 | Keychain (`-c`, `-ac`, `-rc`) | `<contact>.meta`, `<contact>_enc.key`, `<contact>_dec.key`, `<contact>.lock`, plus the transient staging and pending files - see [The `.keychain/` directory](#the-keychain-directory) for the full table | `.keychain/` in the current directory |
-| Key-pair generation (`-nk`) | `encryption_<a>.txt`, `decryption_<a>.txt`, `encryption_<b>.txt`, `decryption_<b>.txt` | current directory |
+| Key-pair generation (`-nk`) | `<a>_keys/encryption_for_<b>.key`, `<a>_keys/decryption_from_<b>.key`, `<b>_keys/encryption_for_<a>.key`, `<b>_keys/decryption_from_<a>.key` (the `<name>_keys/` directories are created `0700`) | current directory |
 | Direct key file (`otp <keyfile>`) | `<keyfile>.YYYY-MM-DD_HH-MM-SS.next` | alongside the key file |
 
 **The keychain location is not configurable.** It is always `.keychain/` relative to the process's current working directory, so running `otp` from a different directory uses a different keychain. That is what lets you keep two correspondents' keychains side by side in separate directories.
@@ -346,19 +358,19 @@ Because the two directions are independent, they also exhaust independently - a 
    ```
 
 2. **Distribute keys securely** (via encrypted USB, in-person, etc.):
-   - Alice receives: `encryption_alice.txt` and `decryption_alice.txt`
-   - Bob receives: `encryption_bob.txt` and `decryption_bob.txt`
+   - Alice receives the `alice_keys/` directory (`encryption_for_bob.key` and `decryption_from_bob.key`)
+   - Bob receives the `bob_keys/` directory (`encryption_for_alice.key` and `decryption_from_alice.key`)
 
 3. **Add contacts to keychain**:
    
    On Alice's machine:
    ```bash
-   otp --add-contact bob encryption_alice.txt decryption_alice.txt
+   otp --add-contact bob alice_keys/encryption_for_bob.key alice_keys/decryption_from_bob.key
    ```
    
    On Bob's machine:
    ```bash
-   otp --add-contact alice encryption_bob.txt decryption_bob.txt
+   otp --add-contact alice bob_keys/encryption_for_alice.key bob_keys/decryption_from_alice.key
    ```
 
 #### Encrypt and Decrypt with Keychain
@@ -393,11 +405,11 @@ Complete example of secure communication:
 # 1. Generate 1MB key pair
 cat /dev/urandom | otp --new-key-pair 1 alice bob
 
-# 2. Alice adds Bob to her keychain
-otp --add-contact bob encryption_alice.txt decryption_alice.txt
+# 2. Alice adds Bob to her keychain (using her own alice_keys/ pair)
+otp --add-contact bob alice_keys/encryption_for_bob.key alice_keys/decryption_from_bob.key
 
-# 3. Bob adds Alice to his keychain (on his machine)
-otp --add-contact alice encryption_bob.txt decryption_bob.txt
+# 3. Bob adds Alice to his keychain (on his machine, using his bob_keys/ pair)
+otp --add-contact alice bob_keys/encryption_for_alice.key bob_keys/decryption_from_alice.key
 
 # 4. Alice encrypts and sends
 echo "Secret message" | otp -c bob --encrypt > msg1.bin

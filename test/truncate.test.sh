@@ -36,11 +36,11 @@ KEY_BYTES=1048576  # --new-key-pair 1 creates 1MB keys per direction
 run_full_consumption() {
   NAME=$1
 
-  rm -rf .keychain
+  rm -rf .keychain "${NAME}_keys" "${NAME}peer_keys"
   dd if=/dev/urandom of=trunc_tmpkey bs=1048576 count=2 2>/dev/null
   cat trunc_tmpkey | ./bin/otp --new-key-pair 1 "$NAME" "${NAME}peer" > /dev/null 2>&1
   rm -f trunc_tmpkey
-  ./bin/otp --add-contact "$NAME" "encryption_$NAME.txt" "decryption_$NAME.txt" > /dev/null 2>&1
+  ./bin/otp --add-contact "$NAME" "${NAME}_keys/encryption_for_${NAME}peer.key" "${NAME}_keys/decryption_from_${NAME}peer.key" > /dev/null 2>&1
   if [ $? -ne 0 ]; then
     echo "     ! ${RED}FAIL${NC} - test setup: could not create contact $NAME with keys"
     exit 1
@@ -84,9 +84,8 @@ run_full_consumption() {
     exit 1
   fi
 
-  rm -f trunc_full_msg.bin trunc_cipher.bin \
-    "encryption_$NAME.txt" "decryption_$NAME.txt" \
-    "encryption_${NAME}peer.txt" "decryption_${NAME}peer.txt"
+  rm -f trunc_full_msg.bin trunc_cipher.bin
+  rm -rf "${NAME}_keys" "${NAME}peer_keys"
 }
 
 # -----------------------------------------------------------------------------
@@ -141,4 +140,4 @@ fi
 
 echo "     Cleaning up test files..."
 rm -rf .keychain
-rm -f trunc_* encryption_trunc*.txt decryption_trunc*.txt
+rm -rf trunc_* trunc*_keys
