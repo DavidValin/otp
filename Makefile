@@ -84,12 +84,18 @@ mingw:
 	@echo " - Built bin/otp.exe!"
 	@echo
 
-# Cross-compile Linux ARM binaries with the GNU cross toolchains
-# (gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf). The test suite cannot
-# run here (the binary targets another architecture); on an ARM host,
-# plain `make build` compiles natively and runs the full suite instead.
-# _FILE_OFFSET_BITS=64 matters most on arm32, where off_t is 32-bit by
-# default and keys over 2GB would fail without it.
+# Cross-compile Linux binaries for foreign architectures with the GNU
+# cross toolchains (gcc-aarch64-linux-gnu / gcc-arm-linux-gnueabihf /
+# gcc-riscv64-linux-gnu). A cross-built binary cannot be executed by the
+# build machine directly, so these targets build only; the test-arm32 and
+# test-riscv64 targets below run the full suite against them under
+# qemu-user emulation (arm64 is instead tested natively, both in CI and
+# by `make build` on any arm64 host). arm32 and riscv64 are built static:
+# the program uses no NSS/dlopen functionality, so static (glibc) linking
+# is safe, and it makes the binary run on any distribution - and under
+# qemu with no target sysroot. _FILE_OFFSET_BITS=64 matters most on
+# arm32, where off_t is 32-bit by default and keys over 2GB would fail
+# without it.
 arm64:
 	@echo
 	@echo " - Cross-compiling Linux arm64 binary..."
@@ -100,17 +106,12 @@ arm64:
 
 arm32:
 	@echo
-	@echo " - Cross-compiling Linux arm32 (hard-float) binary..."
+	@echo " - Cross-compiling Linux arm32 (hard-float) static binary..."
 	@mkdir -p bin
-	@arm-linux-gnueabihf-gcc -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@arm-linux-gnueabihf-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
 	@echo " - Built bin/otp (arm32)!"
 	@echo
 
-# Cross-compile a Linux riscv64 binary (gcc-riscv64-linux-gnu). Built
-# static - the program uses no NSS/dlopen functionality, so static glibc
-# is safe - which lets the binary run on any riscv64 Linux system and
-# lets CI run the full test suite against it under qemu-user emulation
-# with no target sysroot.
 riscv64:
 	@echo
 	@echo " - Cross-compiling Linux riscv64 static binary..."
@@ -118,6 +119,40 @@ riscv64:
 	@riscv64-linux-gnu-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
 	@echo " - Built bin/otp (riscv64)!"
 	@echo
+
+# Run the full test suite against a cross-built binary under qemu
+# user-mode emulation - the same coverage CI has, runnable locally.
+# Needs the matching qemu binary on PATH (package: qemu-user or
+# qemu-user-static). bin/otp is temporarily replaced by a wrapper that
+# routes every ./bin/otp invocation through qemu, and the real binary is
+# put back when the suite finishes, pass or fail.
+test-arm32: arm32
+	@echo " - Testing arm32 binary under qemu..."
+	@QEMU=$$(command -v qemu-arm || command -v qemu-arm-static); \
+	[ -n "$$QEMU" ] || { echo "Error: qemu-arm not found (install qemu-user or qemu-user-static)"; exit 1; }; \
+	mv bin/otp bin/otp.target; \
+	printf '#!/bin/sh\nexec %s "$$(dirname "$$0")/otp.target" "$$@"\n' "$$QEMU" > bin/otp; \
+	chmod +x bin/otp; \
+	rc=0; \
+	for t in otp keychain commit lock metadata confirm truncate; do \
+	  bash test/$$t.test.sh || { rc=1; break; }; \
+	done; \
+	mv bin/otp.target bin/otp; \
+	[ $$rc -eq 0 ] && echo " - Tested!"; exit $$rc
+
+test-riscv64: riscv64
+	@echo " - Testing riscv64 binary under qemu..."
+	@QEMU=$$(command -v qemu-riscv64 || command -v qemu-riscv64-static); \
+	[ -n "$$QEMU" ] || { echo "Error: qemu-riscv64 not found (install qemu-user or qemu-user-static)"; exit 1; }; \
+	mv bin/otp bin/otp.target; \
+	printf '#!/bin/sh\nexec %s "$$(dirname "$$0")/otp.target" "$$@"\n' "$$QEMU" > bin/otp; \
+	chmod +x bin/otp; \
+	rc=0; \
+	for t in otp keychain commit lock metadata confirm truncate; do \
+	  bash test/$$t.test.sh || { rc=1; break; }; \
+	done; \
+	mv bin/otp.target bin/otp; \
+	[ $$rc -eq 0 ] && echo " - Tested!"; exit $$rc
 
 install-musl:
 	@echo

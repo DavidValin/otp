@@ -52,21 +52,19 @@ jobs:
             runner: ubuntu-24.04-arm
             make_target: build
             setup: ''
-          # `make arm32` cross-compiles the 32-bit ARM hard-float binary
-          # (Raspberry Pi OS 32-bit and similar). The test suite cannot run
-          # here (the binary targets another architecture), but the same
-          # sources are fully tested natively on x86_64 and arm64.
+          # `make test-arm32` / `make test-riscv64` cross-compile static
+          # binaries (32-bit ARM hard-float for Raspberry Pi OS and
+          # similar; riscv64) and then run the full test suite against
+          # them under qemu user-mode emulation - the same targets work
+          # locally on any machine with the cross toolchain and qemu-user
+          # installed.
           - artifact: otp-armv7l_linux
             runner: ubuntu-latest
-            make_target: arm32
+            make_target: test-arm32
             setup: arm32
-          # `make riscv64` cross-compiles a static riscv64 binary. Unlike
-          # the other cross builds, the full test suite DOES run here: the
-          # binary is static, so qemu-user binfmt emulation executes it
-          # transparently with no target sysroot.
           - artifact: otp-riscv64_linux
             runner: ubuntu-latest
-            make_target: riscv64
+            make_target: test-riscv64
             setup: riscv64
           - artifact: otp-aarch64_macos
             runner: macos-14
@@ -94,9 +92,9 @@ jobs:
         if: matrix.setup == 'mingw'
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
 
-      - name: Install ARM cross toolchain
+      - name: Install ARM cross toolchain and qemu
         if: matrix.setup == 'arm32'
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf qemu-user-static
 
       - name: Install RISC-V cross toolchain and qemu
         if: matrix.setup == 'riscv64'
@@ -104,15 +102,6 @@ jobs:
 
       - name: Build and test
         run: make ${{ matrix.make_target }}
-
-      # qemu-user-static registers binfmt handlers, so the static riscv64
-      # binary runs transparently and the test scripts need no changes.
-      - name: Test riscv64 binary under qemu emulation
-        if: matrix.setup == 'riscv64'
-        run: |
-          for t in otp keychain commit lock metadata confirm truncate; do
-            bash "test/$t.test.sh" || exit 1
-          done
 
       - name: Archive artifact (unix)
         if: matrix.make_target != 'mingw'
@@ -134,8 +123,14 @@ jobs:
 
   release:
     name: Create release & upload assets
+    # No `if:` - the default gating is exactly what a release wants: every
+    # build job must have succeeded (all targets built AND passed their
+    # tests), and a skipped build (tag not on main) skips the release too.
+    # The previous `if: always() && guard succeeded` published a release
+    # even when build jobs failed - with the broken targets silently
+    # missing from the assets - and created an empty release for tags not
+    # on main.
     needs: [guard, build]
-    if: always() && needs.guard.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
