@@ -1,13 +1,8 @@
 ## One Time Pad "otp" command
 
-This program takes stdin, xor's it with a key file and outputs to stdout.
-When it finishes it writes a new file containing the part of the key file that was not used, named after the key file with a timestamp and a `.next` suffix - e.g. `key.txt` produces `key.txt.2026-08-16_19-48-21.next`.
+This program takes stdin, xor's it with one-time-pad key material held in a keychain of contacts, and outputs the result to stdout.
 
-When using one time pad algorithm, it is critical to remember to never reuse the part of the key that was used, that is why a new key file is created with the part that wasn't used. Once you use a key and the message has been sent to the recipient you should remove the old key file to avoid reusing the same region of the key. Always use the latest .next key file generated to encrypt next messages.
-
-### Tutorial
-
-[![YouTube](http://i.ytimg.com/vi/AE1kFnRsTuY/hqdefault.jpg)](https://www.youtube.com/watch?v=AE1kFnRsTuY)
+When using the one time pad algorithm, it is critical to remember to never reuse the part of the key that was used. The keychain enforces this automatically: every encrypt/decrypt consumes its key bytes and physically destroys them, so a spent key range can never serve a second message.
 
 ## Installation
 
@@ -79,7 +74,7 @@ cmp alice_keys/encryption_for_bob.key bob_keys/encryption_for_alice.key    # mus
 
 See [Two keys per contact](#two-keys-per-contact-mirrored-between-the-two-parties) for why the roles are split this way.
 
-`--add-contact` refuses two key files that overlap, since one pad serving both directions means the range that encrypts an outgoing message also decrypts an incoming one. The comparison is by content, not by name or size, so all these forms are rejected: the same file twice, a copy under a different name, a pad paired with part of itself (a `.next` file or a partially consumed key from `.keychain/` is the *tail* of the pad it came from), and even a slice trimmed at both ends or two windows cut from the same pad - the check searches for each file's opening 64 bytes at *every* offset of the other with a rolling hash, so overlap is found wherever it hides, not only when the files line up at an end. Keys smaller than 64 bytes keep the aligned prefix/suffix comparison only, since a handful of bytes genuinely can coincide in two independent pads. The cost is one sequential read of each file, paid once per add.
+`--add-contact` refuses two key files that overlap, since one pad serving both directions means the range that encrypts an outgoing message also decrypts an incoming one. The comparison is by content, not by name or size, so all these forms are rejected: the same file twice, a copy under a different name, a pad paired with part of itself (a partially consumed key from `.keychain/` is the *tail* of the pad it came from), and even a slice trimmed at both ends or two windows cut from the same pad - the check searches for each file's opening 64 bytes at *every* offset of the other with a rolling hash, so overlap is found wherever it hides, not only when the files line up at an end. Keys smaller than 64 bytes keep the aligned prefix/suffix comparison only, since a handful of bytes genuinely can coincide in two independent pads. The cost is one sequential read of each file, paid once per add.
 
 The same search runs **across contacts**: a candidate key that overlaps a key already installed for any other contact is refused in the same-direction case (one pad consumed twice from its own start is two messages sharing bytes), and warned about in the mirrored case - new encryption key equals an existing decryption key or vice versa - which is how one machine legitimately operates both endpoints of its own pads for loopback testing in a single directory.
 
@@ -110,7 +105,7 @@ Common operations:
 #### Keychain Features
 
 - **Streaming architecture:** Keys stored in `.keychain/` directory, read in 4MB chunks - supports keys up to 1TB without loading into RAM
-- **Automatic key management:** Keys are consumed automatically; no manual .next file handling
+- **Automatic key management:** Keys are consumed automatically; no manual key-file handling
 - **Metadata tracking:** Sequence numbers, offsets, and timestamps tracked for each contact in its own `.keychain/<contact>.meta` file
 - **Perfect forward secrecy:** Key consumption tracked via offsets; past messages can't be decrypted if offset information is lost
 - **Binary safe:** Handles binary cipher text correctly
@@ -282,7 +277,6 @@ Everything `otp` creates itself is mode `0600` (and the `.keychain/` directory `
 |---|---|---|
 | Keychain (`-c`, `-ac`, `-rc`) | `<contact>.meta`, `<contact>_enc.key`, `<contact>_dec.key`, `<contact>.lock`, `<contact>.last_sent`/`<contact>.last_received` (safety copy of the last delivered payload, removed automatically by `otp` once the next operation confirms delivery), plus the transient staging and pending files - see [The `.keychain/` directory](#the-keychain-directory) for the full table | `.keychain/` in the current directory |
 | Key-pair generation (`-nk`) | `<a>_keys/encryption_for_<b>.key`, `<a>_keys/decryption_from_<b>.key`, `<b>_keys/encryption_for_<a>.key`, `<b>_keys/decryption_from_<a>.key` (the `<name>_keys/` directories are created `0700`) | current directory |
-| Direct key file (`otp <keyfile>`) | `<keyfile>.YYYY-MM-DD_HH-MM-SS.next` | alongside the key file |
 
 **The keychain location is not configurable.** It is always `.keychain/` relative to the process's current working directory, so running `otp` from a different directory uses a different keychain. That is what lets you keep two correspondents' keychains side by side in separate directories.
 
@@ -295,24 +289,6 @@ otp -c bob --encrypt < secret.txt > cipher.bin   # cipher.bin is 0644, created b
 Ciphertext being world-readable is harmless, but the same applies to plaintext on the decrypt side. If that matters, set `umask 077` first or write into a directory that is already `0700`.
 
 ## How to use (encryption / decryption)
-
-There are two ways to use OTP: directly with key files, or with the keychain system for managing multiple contacts.
-
-### Using Key Files Directly
-
-* Create a key file: `printf '%s' 'mysupersecretkey' > key.txt`
-* Encrypt using key: `printf '%s' 'topsecretmsg' | otp key.txt > cipher.txt`
-* Decrypt using key: `cat cipher.txt | otp key.txt > plain.txt`
-
-#### Next key
-
-Every time you run the command it creates a new file holding the unused remainder of the key. Its name is the key file's name plus the current local time and a `.next` suffix:
-
-```
-key.txt   ->   key.txt.2026-08-16_19-48-21.next
-```
-
-It is **not** simply `key.txt.next` - the timestamp is always present, so a script cannot assume a fixed name. The file is created `0600` with `O_CREAT|O_EXCL`, so a second run within the same second fails rather than silently overwriting the first run's remainder.
 
 ### Using the Keychain System
 
@@ -427,7 +403,7 @@ otp --show-contact bob
 
 #### Important Notes
 
-- **Key consumption:** Both key file and keychain methods track key consumption via offsets
+- **Key consumption:** Key consumption is tracked via offsets and enforced by physically truncating the key files
 - **Keychain location:** the `.keychain/` directory is in the current directory; everything (keys, metadata, locks) lives inside it
 - **File permissions:** everything `otp` creates inside `.keychain/` is created `0600` (and the directory `0700`) - key files included, from the moment they are copied in. No manual `chmod` is needed
 - **Backup:** Back up the `.keychain/` directory securely if needed

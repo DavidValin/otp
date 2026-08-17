@@ -8,7 +8,7 @@
  *   this codebase already relies on for POSIX. Every caller - the           *
  *   directory scans in commit.c (recovery-artifact lookup) and keychain.c   *
  *   (loading per-contact .meta files), and the flock() calls in             *
- *   commit.c's per-contact locking and otp.c's direct key-file mode -       *
+ *   commit.c's per-contact locking -                                        *
  *   uses these names completely unconditionally, with no #ifdef _WIN32 at   *
  *   any call site. On POSIX this header changes nothing: it just includes   *
  *   the real <dirent.h> and <sys/file.h>.                                   *

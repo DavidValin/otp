@@ -189,12 +189,12 @@ static int copy_key_file(const char *src_path, const char *dst_path)
 //
 // Equal size is NOT a precondition for danger, so it is not used as a
 // shortcut. Key material here is consumed from the front and the file is
-// truncated, so the natural leftovers of this tool - a ".next" file from
-// the direct key-file mode, a partially consumed key from .keychain/ -
-// are *suffixes* of the pad they came from. Handing over a pad and its
-// own leftover is overlap just as total as handing over the same file
-// twice, and the sizes differ precisely because some of it was already
-// spent. A truncated head of a pad is the mirror image of that case.
+// truncated, so the natural leftover of this tool - a partially consumed
+// key from .keychain/ - is a *suffix* of the pad it came from. Handing
+// over a pad and its own leftover is overlap just as total as handing
+// over the same file twice, and the sizes differ precisely because some
+// of it was already spent. A truncated head of a pad is the mirror image
+// of that case.
 //
 // Nor is overlap confined to those two alignments: a pad trimmed at both
 // ends, or two windows cut from the same pad, share key material without
@@ -204,7 +204,7 @@ static int copy_key_file(const char *src_path, const char *dst_path)
 // read of each file. Any overlap that includes either file's first
 // KEY_ANCHOR_LEN bytes is found this way; only an overlap that excludes
 // both files' heads (which no artifact of this tool produces - every
-// truncation and every ".next" file preserves one end) or one shorter
+// truncation preserves one end) or one shorter
 // than the anchor can escape. Files smaller than the anchor keep the two
 // aligned comparisons only: a handful of bytes genuinely can coincide in
 // two independent pads, and refusing on such a coincidence would reject
@@ -1367,7 +1367,7 @@ static int add_contact_with_keys_locked(const char *name, const char *encryption
                          "is key that the larger file also covers"
                        : (overlap == KEY_OVERLAP_SUFFIX
                               ? " - the smaller file is the tail of the larger one, which is what a partially "
-                                "consumed key or a \".next\" file looks like; every byte it holds is still "
+                                "consumed key looks like; every byte it holds is still "
                                 "present in the larger file"
                               : " - a stretch of one appears inside the other at an interior offset, which "
                                 "is what a pad trimmed at both ends (or two windows cut from one pad) "

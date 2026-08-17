@@ -34,6 +34,7 @@ echo "   - Commit / crash-recovery functionality"
 #  helper: compute the expected ciphertext for the first N bytes of a key
 #  file, where N is the size of the given plaintext file
 # -----------------------------------------------------------------------------
+. test/xor.helper.sh
 expected_cipher() {
   KEYFILE=$1
   PLAINFILE=$2
@@ -41,8 +42,8 @@ expected_cipher() {
   OUT=$4
   LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
   dd if="$KEYFILE" of=commit_key_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-  ./bin/otp commit_key_slice.tmp < "$PLAINFILE" > "$OUT" 2>/dev/null
-  rm -f commit_key_slice.tmp commit_key_slice.tmp.*.next
+  xor_with_key commit_key_slice.tmp "$PLAINFILE" "$OUT"
+  rm -f commit_key_slice.tmp
 }
 
 # -----------------------------------------------------------------------------

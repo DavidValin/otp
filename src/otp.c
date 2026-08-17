@@ -1,14 +1,14 @@
 /*****************************************************************************\
  *                                                                            *
- *   otp v1.2.0                                                               *
+ *   otp v1.3.0                                                               *
  *                                                                            *
  *    simple but effective one time pad encryption / decryption command       *
- *    that works with stdin/stdout and saves next unused key file.            *
- *    Supports key pair generation.                                           *
+ *    that works with stdin/stdout, managing contacts and key material        *
+ *    through a keychain. Supports key pair generation.                       *
  *                                                                            *
  *   Author: David Valin <hola@davidvalin.com> - www.davidvalin.com           *
  *   License: Apache 2.0                                                      *
- *   February 2 2026                                                          *
+ *   August 17 2026                                                           *
  *                                                                            *
  \****************************************************************************/
 
@@ -21,14 +21,11 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-#include <time.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 
 #include <errno.h>
-#include <signal.h>
 #ifndef _WIN32
-#include <sys/file.h>
 #include <unistd.h>
 #endif
 #ifdef _WIN32
@@ -46,14 +43,8 @@
 #include <direct.h>
 #include <windows.h>
 /* Map POSIX flags to MSVC equivalents */
-#ifndef O_RDONLY
-#define O_RDONLY _O_RDONLY
-#endif
 #ifndef O_WRONLY
 #define O_WRONLY _O_WRONLY
-#endif
-#ifndef O_RDWR
-#define O_RDWR _O_RDWR
 #endif
 #ifndef O_CREAT
 #define O_CREAT _O_CREAT
@@ -61,32 +52,14 @@
 #ifndef O_EXCL
 #define O_EXCL _O_EXCL
 #endif
-#ifndef O_APPEND
-#define O_APPEND _O_APPEND
-#endif
 #ifndef O_BINARY
 #define O_BINARY _O_BINARY
 #endif
-/* flock()/LOCK_EX come from platform.h's LockFileEx-backed shim, so the
- * direct key-file mode gets the same locking guarantee on Windows as on
- * POSIX. */
-/* Map POSIX names to the CRT's underscore spellings. fstat maps to the
- * explicitly 64-bit _fstat64 (with its matching struct) rather than
- * _fstat, whose st_size is a 32-bit long even in 64-bit builds and would
- * silently misreport keys larger than 2GB. */
+/* Map POSIX names to the CRT's underscore spellings. */
 #define close _close
 #define open _open
 #define mkdir(path, mode) _mkdir(path)
 #define rmdir _rmdir
-#define fstat _fstat64
-#define stat64_t struct _stat64
-#define getpid _getpid
-#ifndef S_ISREG
-/* MinGW defines S_ISREG; MSVC's <sys/stat.h> does not */
-#define S_ISREG(m) (((m) & _S_IFMT) == _S_IFREG)
-#endif
-#else
-#define stat64_t struct stat
 #endif
 #ifndef O_BINARY
 #define O_BINARY 0
@@ -193,20 +166,14 @@ int main(int argc, char *argv[])
    * binary data: it rewrites \n<->\r\n and treats the first 0x1A (Ctrl-Z)
    * as end-of-file. Every byte this tool moves through the standard
    * streams is arbitrary binary - ciphertext on the way out, plaintext on
-   * the way in - in both the direct key-file mode and the keychain mode
-   * (which is handed these very streams as input/output). Without this a
-   * message containing 0x0A, 0x0D or 0x1A would be silently mangled. The
-   * file paths already use O_BINARY; this is the matching fix for the
-   * streams themselves, and must run before any byte is read or written. */
+   * the way in - and the keychain encrypt/decrypt path is handed these
+   * very streams as input/output. Without this a message containing 0x0A,
+   * 0x0D or 0x1A would be silently mangled. The file paths already use
+   * O_BINARY; this is the matching fix for the streams themselves, and
+   * must run before any byte is read or written. */
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
 #endif
-
-  /* Index of the key-file argument in direct key-file mode. This was
-   * previously the getopt global `optind`, but getopt() is never called
-   * here and <unistd.h> (its only declaration) does not exist on
-   * Windows, so it is a plain local now. */
-  const int key_arg = 1;
 
   /* **************************************************************************
    *  Handles -h (--help) command                                             *
@@ -214,7 +181,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
   {
-    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file.\n\n");
+    puts("\n\n otp 1.3.0 - www.davidvalin.com\n\nThis program takes stdin, xor's it with one-time-pad key material held in a keychain of contacts, and outputs the result to stdout. Consumed key material is destroyed automatically so it can never be reused.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file.\n\n");
     return 0;
   }
 
@@ -583,205 +550,9 @@ int main(int argc, char *argv[])
 
 
   /* **************************************************************************
-   *  Handles encryption / decryption via stdin + key file                    *
+   *  Anything else is not a recognized command                               *
    * *********************************************************************** */
 
-  // Ensure we have a key file argument for encryption/decryption
-  if (argc < 2)
-  {
-    fprintf(stderr, "Error: No key file specified. Use -h for help.\n");
-    return 1;
-  }
-
-  /* Build output name from a 1-second-resolution timestamp (no random
-   * suffix); O_CREAT|O_EXCL below rejects a same-second collision instead
-   * of silently overwriting it. */
-  char outfileunused[256];
-  time_t t = time(NULL);
-  struct tm tm_struct;
-#ifdef _WIN32
-  localtime_s(&tm_struct, &t);
-#else
-  localtime_r(&t, &tm_struct);
-#endif
-
-  snprintf(outfileunused, sizeof outfileunused,
-           "%s.%04d-%02d-%02d_%02d-%02d-%02d.next",
-           argv[key_arg],
-           tm_struct.tm_year + 1900, tm_struct.tm_mon + 1, tm_struct.tm_mday,
-           tm_struct.tm_hour, tm_struct.tm_min, tm_struct.tm_sec);
-  /* Ensure unique output file atomically (O_CREAT|O_EXCL) */
-  int out_fd = open(outfileunused, O_WRONLY | O_CREAT | O_EXCL | O_BINARY, 0600);
-  if (out_fd < 0)
-  {
-    fprintf(stderr, "Error creating output file %s: %s\n", outfileunused, strerror(errno));
-    return 1;
-  }
-
-  /* Everything below shares one failure path, which removes the .next
-   * file. It is created before the key file has even been opened, so
-   * without that every error - an unreadable key, a short key, a failed
-   * write - left behind a 0-byte or half-written successor key. That is
-   * worse than leaving nothing: an empty .next file is exactly what a
-   * fully consumed key looks like, and a truncated one silently discards
-   * the key material it should have carried forward. */
-  FILE *infile = NULL;
-  FILE *unused = NULL;
-  unsigned char *keybuf = NULL;
-  int key_fd = -1;
-  size_t key_size = 0;
-  size_t used = 0;
-  stat64_t ks;
-
-  unused = fdopen(out_fd, "wb");
-  if (!unused)
-  {
-    fprintf(stderr, "Error opening output file %s: %s\n", outfileunused, strerror(errno));
-    close(out_fd);
-    goto fail;
-  }
-
-  /* Open and lock key file */
-  key_fd = open(argv[key_arg], O_RDONLY | O_BINARY);
-  if (key_fd < 0)
-  {
-    fprintf(stderr, "Error opening key file %s: %s\n", argv[key_arg], strerror(errno));
-    goto fail;
-  }
-  if (flock(key_fd, LOCK_EX) < 0)
-  {
-    fprintf(stderr, "Error locking key file %s: %s\n", argv[key_arg], strerror(errno));
-    close(key_fd);
-    goto fail;
-  }
-  infile = fdopen(key_fd, "rb");
-  if (!infile)
-  {
-    fprintf(stderr, "Error reading key file %s: %s\n", argv[key_arg], strerror(errno));
-    close(key_fd);
-    goto fail;
-  }
-  /* Determine key file size */
-  if (fstat(key_fd, &ks) < 0)
-  {
-    fprintf(stderr, "Error statting key file %s: %s\n", argv[key_arg], strerror(errno));
-    goto fail;
-  }
-  if (!S_ISREG(ks.st_mode))
-  {
-    fprintf(stderr, "%s is not a regular file\n", argv[key_arg]);
-    goto fail;
-  }
-  /* Refuse rather than truncate on a 32-bit build: a silently narrowed
-   * size would make the key look shorter than it is. */
-  if (otp_size_to_size_t((unsigned long long)ks.st_size, &key_size) != 0)
-  {
-    fprintf(stderr, "Key file %s is too large for this build\n", argv[key_arg]);
-    goto fail;
-  }
-  if (key_size == 0)
-  {
-    fprintf(stderr, "Key file %s is empty\n", argv[key_arg]);
-    goto fail;
-  }
-  /* Read key into memory */
-  keybuf = malloc(key_size);
-  if (!keybuf)
-  {
-    fprintf(stderr, "Memory allocation failed\n");
-    goto fail;
-  }
-  if (fread(keybuf, 1, key_size, infile) != key_size)
-  {
-    fprintf(stderr, "Error reading key file %s\n", argv[key_arg]);
-    goto fail;
-  }
-  /* Handle empty stdin early */
-  int first = fgetc(stdin);
-  if (first == EOF)
-  {
-    /* No key was consumed, so there is no successor key to write. The
-     * .next file is removed rather than left empty, which would claim
-     * the opposite. */
-    fprintf(stderr, "No input provided; no key consumed and no %s written.\n", outfileunused);
-    free(keybuf);
-    fclose(infile);
-    fclose(unused);
-    remove(outfileunused);
-    return 0;
-  }
-  /* Put the byte back for normal processing */
-  ungetc(first, stdin);
-#ifndef _WIN32
-  /* Ignore SIGPIPE to handle closed pipes gracefully. Windows has no
-   * SIGPIPE at all: a write to a closed pipe just fails, which the
-   * fwrite error checks below already handle on both platforms. */
-  signal(SIGPIPE, SIG_IGN);
-#endif
-  unsigned char outbyte;
-  while (fread(&outbyte, 1, 1, stdin) == 1)
-  {
-    if (used >= key_size)
-    {
-      fprintf(stderr, "Error: key file %s shorter than input.\n", argv[key_arg]);
-      goto fail;
-    }
-    /* Encrypt current byte using key */
-    outbyte ^= keybuf[used];
-    if (fwrite(&outbyte, 1, 1, stdout) != 1)
-    {
-      fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
-      goto fail;
-    }
-    used++;
-  }
-  if (ferror(stdin))
-  {
-    fprintf(stderr, "Error reading input: %s\n", strerror(errno));
-    goto fail;
-  }
-  /* Write remaining key bytes to the .next key file */
-  if (used < key_size)
-  {
-    if (fwrite(keybuf + used, 1, key_size - used, unused) != key_size - used)
-    {
-      fprintf(stderr, "Error writing remainder to %s: %s\n", outfileunused, strerror(errno));
-      goto fail;
-    }
-  }
-
-  free(keybuf);
-  keybuf = NULL;
-  fclose(infile);
-  infile = NULL;
-
-  /* fwrite() only fills a buffer; both of these are where a full disk or
-   * a failing device actually reports itself. Without the checks, lost
-   * ciphertext and a truncated successor key both exit 0. */
-  if (fclose(unused) != 0)
-  {
-    fprintf(stderr, "Error writing %s: %s\n", outfileunused, strerror(errno));
-    unused = NULL;
-    goto fail;
-  }
-  unused = NULL;
-
-  if (fflush(stdout) != 0)
-  {
-    fprintf(stderr, "Error writing to stdout: %s\n", strerror(errno));
-    /* The .next file is already closed and correct at this point; the
-     * key file is untouched, so the operation is simply retryable. */
-    remove(outfileunused);
-    return 1;
-  }
-  return 0;
-
-fail:
-  free(keybuf);
-  if (infile)
-    fclose(infile);
-  if (unused)
-    fclose(unused);
-  remove(outfileunused);
+  fprintf(stderr, "Error: Unknown command. Use -h for help.\n");
   return 1;
 }

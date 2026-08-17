@@ -84,13 +84,9 @@ fi
 
 # Also confirm the ciphertext each process produced is actually correct,
 # not just that the bookkeeping looks right.
-dd if=meta_keyA.txt of=meta_sliceA.tmp bs=1 count="$LENA" 2>/dev/null
-./bin/otp meta_sliceA.tmp < meta_plainA.txt > meta_expectedA.bin 2>/dev/null
-rm -f meta_sliceA.tmp meta_sliceA.tmp.*.next
-
-dd if=meta_keyB.txt of=meta_sliceB.tmp bs=1 count="$LENB" 2>/dev/null
-./bin/otp meta_sliceB.tmp < meta_plainB.txt > meta_expectedB.bin 2>/dev/null
-rm -f meta_sliceB.tmp meta_sliceB.tmp.*.next
+. test/xor.helper.sh
+xor_with_key meta_keyA.txt meta_plainA.txt meta_expectedA.bin
+xor_with_key meta_keyB.txt meta_plainB.txt meta_expectedB.bin
 
 cmp -s meta_cipherA.bin meta_expectedA.bin
 CIPHER_A_OK=$?
