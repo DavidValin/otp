@@ -133,6 +133,20 @@ static int keypair_stream_pad(unsigned char *buf, size_t size,
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+  /* Windows opens stdin/stdout in text mode by default, which corrupts
+   * binary data: it rewrites \n<->\r\n and treats the first 0x1A (Ctrl-Z)
+   * as end-of-file. Every byte this tool moves through the standard
+   * streams is arbitrary binary - ciphertext on the way out, plaintext on
+   * the way in - in both the direct key-file mode and the keychain mode
+   * (which is handed these very streams as input/output). Without this a
+   * message containing 0x0A, 0x0D or 0x1A would be silently mangled. The
+   * file paths already use O_BINARY; this is the matching fix for the
+   * streams themselves, and must run before any byte is read or written. */
+  _setmode(_fileno(stdin), _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+
   optind = 1;
 
   /* **************************************************************************
