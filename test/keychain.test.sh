@@ -752,7 +752,13 @@ echo "     Testing key file argument handling..."
 
 ./bin/otp --add-contact halfkeyed kc_namekey.txt > /dev/null 2>kc_half_stderr.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^halfkeyed")
+# Count only the contact's own artifacts (.meta / .key), not its .lock
+# file: acquiring the per-contact lock legitimately creates <name>.lock
+# even for an add that is then rejected, exactly as encrypt/decrypt/remove
+# do, and that empty lock file is deliberately persistent (see
+# remove_contact in src/keychain.c). "Creating nothing" means creating no
+# contact, i.e. no .meta or .key.
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^halfkeyed" | grep -vc '\.lock$')
 
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - a single key file argument is rejected, creating nothing"
@@ -808,7 +814,7 @@ dd if=/dev/urandom of=kc_otherkey.txt bs=1 count=500 2>/dev/null
 
 ./bin/otp --add-contact samefile kc_dupkey.txt kc_dupkey.txt > /dev/null 2>kc_dup1.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^samefile")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^samefile" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - the same file passed twice is rejected, creating nothing"
 else
@@ -818,7 +824,7 @@ fi
 
 ./bin/otp --add-contact samebytes kc_dupkey.txt kc_dupcopy.txt > /dev/null 2>kc_dup2.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^samebytes")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^samebytes" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - a copy under a different name is rejected too"
 else
@@ -865,7 +871,7 @@ dd if=/dev/urandom of=kc_fckey2.txt bs=1 count=500 2>/dev/null
 
 OTP_TEST_FAIL_KEY_COMPARE=1 ./bin/otp --add-contact failclosed kc_fckey1.txt kc_fckey2.txt > /dev/null 2>kc_failcmp.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^failclosed")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^failclosed" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - an uncomparable key pair is refused, creating nothing"
 else
@@ -968,7 +974,7 @@ dd if=kc_bigpad.txt of=kc_midslice.txt bs=1024 skip=100 count=100 2>/dev/null
 
 ./bin/otp --add-contact interiortest kc_bigpad.txt kc_midslice.txt > /dev/null 2>kc_interior.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^interiortest")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^interiortest" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - a slice cut from the middle of a pad is rejected against that pad"
 else
@@ -993,7 +999,7 @@ dd if=kc_bigpad.txt of=kc_winB.txt bs=1024 skip=100 count=200 2>/dev/null
 
 ./bin/otp --add-contact interiortest kc_winA.txt kc_winB.txt > /dev/null 2>&1
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^interiortest")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^interiortest" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - two windows sharing only a middle stretch are rejected"
 else
@@ -1035,7 +1041,7 @@ dd if=/dev/urandom of=kc_ccD.txt bs=1 count=500 2>/dev/null
 
 ./bin/otp --add-contact ccsecond kc_ccA.txt kc_ccC.txt > /dev/null 2>kc_cc1.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - a pad already serving as another contact's encryption key is rejected"
 else
@@ -1054,7 +1060,7 @@ fi
 
 ./bin/otp --add-contact ccsecond kc_ccC.txt kc_ccB.txt > /dev/null 2>&1
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - the decryption direction is checked too"
 else
@@ -1068,7 +1074,7 @@ fi
 dd if=kc_ccA.txt of=kc_ccA_tail.txt bs=1 skip=100 2>/dev/null
 ./bin/otp --add-contact ccsecond kc_ccA_tail.txt kc_ccC.txt > /dev/null 2>&1
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^ccsecond")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - a remainder of an installed pad is rejected across contacts too"
 else
@@ -1151,7 +1157,7 @@ printf 'spend this pad' | ./bin/otp -c spentowner --encrypt > /dev/null 2>&1
 dd if=/dev/urandom of=kc_freshdec.txt bs=1 count=500 2>/dev/null
 ./bin/otp --add-contact freshname kc_spentkey.txt kc_freshdec.txt > /dev/null 2>kc_spent.log
 RC=$?
-CREATED=$(ls .keychain/ 2>/dev/null | grep -c "^freshname")
+CREATED=$(ls .keychain/ 2>/dev/null | grep "^freshname" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
   echo "     - PASS - the spent original is rejected even under a fresh contact name"
 else

@@ -1178,12 +1178,10 @@ int load_keychain(void)
 }
 
 
-// Add a contact
-int add_contact(const char *name)
+// Add a contact. Runs with this contact's lock already held and the
+// keychain freshly reloaded under it - see add_contact().
+static int add_contact_locked(const char *name, const char *keychain_dir)
 {
-  if (reject_invalid_contact_name(name) != 0)
-    return -1;
-
   if (g_keychain.count >= MAX_CONTACTS)
   {
     fprintf(stderr, "Error: Maximum contacts reached\n");
@@ -1193,13 +1191,6 @@ int add_contact(const char *name)
   if (find_contact(name))
   {
     fprintf(stderr, "Error: Contact '%s' already exists\n", name);
-    return -1;
-  }
-
-  char keychain_dir[512];
-  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
-  {
-    fprintf(stderr, "Error: Cannot determine keychain directory\n");
     return -1;
   }
 
@@ -1213,12 +1204,53 @@ int add_contact(const char *name)
   return save_contact_meta(keychain_dir, c);
 }
 
-// Add a contact with key files
-int add_contact_with_keys(const char *name, const char *encryption_key_file, const char *decryption_key_file)
+int add_contact(const char *name)
 {
   if (reject_invalid_contact_name(name) != 0)
     return -1;
 
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  // Hold this contact's lock across the existence check and the write -
+  // the same per-contact lock encrypt/decrypt/remove take. Without it two
+  // concurrent adds of one name both see "does not exist" and the slower
+  // writer is silently lost, and an add can race a remove of the same
+  // name. The lock name is built from the contact name, so validation
+  // above must have passed first.
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, name) != 0)
+    return -1;
+
+  // Re-read the on-disk state now that the lock is held: another process
+  // may have added or removed this contact while we waited for the lock,
+  // so the snapshot loaded at process start (without the lock) can be stale.
+  if (load_keychain() != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  int result = add_contact_locked(name, keychain_dir);
+  contact_lock_release(&lock);
+  return result;
+}
+
+// Add a contact with key files. Runs with this contact's lock already
+// held and the keychain freshly reloaded under it - see
+// add_contact_with_keys(). Holding the lock is what makes the
+// cross-contact overlap scan below read a stable set of other contacts:
+// without it, a concurrent add of the same name could also pass its own
+// existence check and both would write, and the reloaded view could go
+// stale mid-scan.
+static int add_contact_with_keys_locked(const char *name, const char *encryption_key_file,
+                                        const char *decryption_key_file, const char *keychain_dir)
+{
   if (g_keychain.count >= MAX_CONTACTS)
   {
     fprintf(stderr, "Error: Maximum contacts reached\n");
@@ -1306,13 +1338,6 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
                               : " - a stretch of one appears inside the other at an interior offset, which "
                                 "is what a pad trimmed at both ends (or two windows cut from one pad) "
                                 "looks like; every shared byte is one pad serving two roles")));
-    return -1;
-  }
-
-  char keychain_dir[512];
-  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
-  {
-    fprintf(stderr, "Error: Cannot determine keychain directory\n");
     return -1;
   }
 
@@ -1460,8 +1485,6 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
   }
   free(spent);
 
-  warn_if_name_previously_used(keychain_dir, name);
-
   // Build destination paths
   char enc_dest[512], dec_dest[512];
   build_key_path(name, "enc", enc_dest, sizeof(enc_dest));
@@ -1504,6 +1527,43 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
     printf("  Decryption key: %zu bytes from %s\n", dec_size, decryption_key_file);
   }
 
+  return result;
+}
+
+int add_contact_with_keys(const char *name, const char *encryption_key_file, const char *decryption_key_file)
+{
+  if (reject_invalid_contact_name(name) != 0)
+    return -1;
+
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+  {
+    fprintf(stderr, "Error: Cannot determine keychain directory\n");
+    return -1;
+  }
+
+  // Sample the "name used before" signal *before* acquiring this contact's
+  // lock: acquiring it creates <name>.lock, which is one of the very
+  // signals this warning keys on, so reading it afterwards would make the
+  // warning fire on every add. It only reads files and needs no locking.
+  warn_if_name_previously_used(keychain_dir, name);
+
+  // Same per-contact lock discipline as encrypt/decrypt/remove - see
+  // add_contact() for why an add must hold it too.
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, name) != 0)
+    return -1;
+
+  if (load_keychain() != 0)
+  {
+    fprintf(stderr, "Error: Failed to reload keychain\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  int result = add_contact_with_keys_locked(name, encryption_key_file,
+                                            decryption_key_file, keychain_dir);
+  contact_lock_release(&lock);
   return result;
 }
 

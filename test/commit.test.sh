@@ -1132,6 +1132,10 @@ if [ "$(id -u)" != "0" ]; then
   ./bin/otp --add-contact iofail commit_iokey.txt commit_iokey.txt.dec > /dev/null 2>&1
 
   # 1. the contact lock cannot be created at all
+  #    Adding the contact now takes (and so creates) iofail.lock itself, so
+  #    remove it first: this sub-case needs the lock file absent so that the
+  #    encrypt below must create it in the (about to be) unwritable dir.
+  rm -f .keychain/iofail.lock
   chmod 500 .keychain
   printf 'blocked' | ./bin/otp -c iofail --encrypt > /dev/null 2>commit_ioerr1.log
   RC=$?

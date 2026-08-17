@@ -504,7 +504,6 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Error reading key file %s\n", argv[optind]);
     goto fail;
   }
-  fseek(infile, 0, SEEK_SET);
   /* Handle empty stdin early */
   int first = fgetc(stdin);
   if (first == EOF)

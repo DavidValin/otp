@@ -223,6 +223,116 @@ rm -f lock_key3.txt lock_key3.txt.dec lock_ctA.bin lock_ctB.bin lock_ptA.bin loc
 rm -f lock_dstderrA.log lock_dstderrB.log
 
 # -----------------------------------------------------------------------------
+#  adding a contact must take the SAME per-contact lock as encrypt/decrypt
+#
+#  Adding a contact reads and writes that contact's own keychain state (the
+#  existence check, the cross-contact overlap scan, the .meta write). Two
+#  concurrent adds of one name would otherwise each pass their own "does
+#  not exist" check and both write, silently losing the slower one; an add
+#  could also race a remove of the same name. add_contact/
+#  add_contact_with_keys therefore hold <contact>.lock across a fresh
+#  reload and the write, exactly as encrypt/decrypt/remove do.
+# -----------------------------------------------------------------------------
+
+echo "     Testing that --add-contact honours the per-contact lock..."
+
+rm -rf .keychain
+
+dd if=/dev/urandom of=lock_addenc.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=lock_adddec.txt bs=1 count=500 2>/dev/null
+
+# Deterministic proof that the add blocks on the contact lock: hold that
+# exact lock file externally, then time how long an add is forced to wait.
+# flock(1) is util-linux-only (absent on e.g. macOS), so skip gracefully
+# where it is unavailable rather than fail on an unrelated platform.
+if command -v flock > /dev/null 2>&1; then
+  mkdir -p .keychain
+  : > .keychain/addblock.lock
+
+  # Hold addblock.lock exclusively for 3 seconds in the background.
+  ( flock 9; sleep 3 ) 9> .keychain/addblock.lock &
+  HOLDER=$!
+  sleep 1  # let the holder acquire before we start the add
+
+  START=$(date +%s)
+  ./bin/otp --add-contact addblock lock_addenc.txt lock_adddec.txt > /dev/null 2>lock_addblock.log
+  ADD_RC=$?
+  END=$(date +%s)
+  wait $HOLDER
+  ELAPSED=$((END - START))
+
+  if [ "$ELAPSED" -ge 2 ] && [ $ADD_RC -eq 0 ]; then
+    echo "     - PASS - the add blocked on the held contact lock (~${ELAPSED}s) then completed"
+  else
+    echo "     ! FAIL - the add did not wait for the contact lock (waited ${ELAPSED}s, exit $ADD_RC)"
+    cat lock_addblock.log
+    exit 1
+  fi
+
+  if [ -f ".keychain/addblock.meta" ]; then
+    echo "     - PASS - the contact was actually added once the lock was released"
+  else
+    echo "     ! FAIL - the contact was not added after the lock cleared"
+    exit 1
+  fi
+  rm -f lock_addblock.log
+else
+  echo "     - SKIP - flock(1) unavailable, cannot run the deterministic blocking check"
+fi
+
+rm -rf .keychain
+
+# Concurrency outcome: fire many adds of the SAME name at once. With the
+# lock exactly one may win (create the contact) and every other must see it
+# already exists and fail cleanly - never a second silent "success" over
+# the first, and never a corrupted contact.
+echo "     Testing concurrent --add-contact of one name yields exactly one contact..."
+
+dd if=/dev/urandom of=lock_racerenc.txt bs=1 count=500 2>/dev/null
+dd if=/dev/urandom of=lock_racerdec.txt bs=1 count=500 2>/dev/null
+
+rm -f lock_rc_*
+i=0
+while [ $i -lt 15 ]; do
+  ( ./bin/otp --add-contact racer lock_racerenc.txt lock_racerdec.txt > /dev/null 2>&1
+    echo $? > "lock_rc_$i" ) &
+  i=$((i + 1))
+done
+wait
+
+SUCCESS=$(cat lock_rc_* 2>/dev/null | grep -c '^0$')
+METAS=$(ls .keychain/ 2>/dev/null | grep -c '^racer\.meta$')
+KEYS=$(ls .keychain/ 2>/dev/null | grep -c '^racer_.*\.key$')
+
+if [ "$SUCCESS" = "1" ]; then
+  echo "     - PASS - exactly one of 15 concurrent adds succeeded"
+else
+  echo "     ! FAIL - $SUCCESS concurrent adds reported success (expected exactly 1) - a lost/duplicated add"
+  exit 1
+fi
+
+if [ "$METAS" = "1" ] && [ "$KEYS" = "2" ]; then
+  echo "     - PASS - the keychain holds exactly one intact 'racer' (1 .meta, 2 .key files)"
+else
+  echo "     ! FAIL - keychain state after the race is wrong ($METAS meta, $KEYS key files)"
+  ls .keychain/
+  exit 1
+fi
+
+# The single surviving contact must be usable: a round-trip through it works.
+printf 'race survivor payload' | ./bin/otp -c racer --encrypt > lock_racecipher.bin 2>/dev/null
+if [ -s lock_racecipher.bin ]; then
+  echo "     - PASS - the surviving contact encrypts normally"
+else
+  echo "     ! FAIL - the surviving contact could not be used to encrypt"
+  exit 1
+fi
+
+rm -f lock_racerenc.txt lock_racerdec.txt lock_rc_* lock_racecipher.bin
+rm -f lock_addenc.txt lock_adddec.txt
+rm -rf .keychain
+
+# -----------------------------------------------------------------------------
 #  cleanup
 # -----------------------------------------------------------------------------
 
