@@ -1,2 +1,5 @@
 bin
 *.next
+*.dec
+*.enc
+test_*
