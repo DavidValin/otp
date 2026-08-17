@@ -594,11 +594,23 @@ fi
 
 echo "     Testing that an input read error is not mistaken for end-of-input..."
 
+# stdin is redirected from a *directory*: on most platforms read() on a
+# directory fd fails with EISDIR, which is exactly the mid-stream read
+# error the guard must catch. On NetBSD FFS, however, read() on a
+# directory succeeds and returns the raw directory blocks, so a directory
+# cannot serve as an error source there - probe first and skip if so. The
+# guarded code path is identical C on every platform and stays covered by
+# the platforms where directory reads do fail.
+mkdir -p commit_notafile
+if dd if=commit_notafile of=/dev/null count=1 2>/dev/null; then
+  echo "     - SKIP - directory reads succeed on this platform; input read error cannot be provoked"
+  rmdir commit_notafile
+else
+
 dd if=/dev/urandom of=commit_readkey.txt bs=1 count=1000 2>/dev/null
 dd if=/dev/urandom of=commit_readkey.txt.dec bs=1 count=$(wc -c < commit_readkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact readerr commit_readkey.txt commit_readkey.txt.dec > /dev/null 2>&1
 
-mkdir -p commit_notafile
 ./bin/otp -c readerr --encrypt < commit_notafile > /dev/null 2>commit_readerr.log
 RC=$?
 OFFSET=$(grep '^EncryptionKeyOffset=' .keychain/readerr.meta | cut -d= -f2)
@@ -623,6 +635,8 @@ fi
 ./bin/otp --remove-contact readerr > /dev/null 2>&1
 rmdir commit_notafile
 rm -f commit_readkey.txt commit_readerr.log
+
+fi
 
 # -----------------------------------------------------------------------------
 #  the read-back verification must actually fire

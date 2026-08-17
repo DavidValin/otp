@@ -13,10 +13,22 @@
 # tests themselves always run from the repo root, which is where they
 # expect ./bin/otp and create their working files.
 #
-# POSIX sh + sed/grep only, so it runs everywhere the test suite does.
+# This script itself is POSIX sh + sed/grep only, so it runs everywhere
+# the test suite does. The test scripts, however, are executed with bash
+# when it is available: that is the interpreter the Makefile always runs
+# them through, and some of their behavior differs under a strict POSIX
+# sh (macOS sh is bash 3.2 in POSIX mode, Ubuntu sh is dash). Falling
+# back to sh only matters on systems without bash, where the scripts'
+# #!/bin/sh line is the suite's best effort anyway.
 
 OUT=$(pwd)/test-report.html
 cd "$(dirname "$0")/.." || exit 1
+
+if command -v bash >/dev/null 2>&1; then
+  TEST_SHELL=bash
+else
+  TEST_SHELL=sh
+fi
 
 if [ ! -x bin/otp ] && [ ! -f bin/otp.exe ]; then
   echo "bin/otp not found - run 'make build' first" >&2
@@ -46,7 +58,7 @@ for t in $TESTS; do
   total=$((total+1))
   printf ' - %s ... ' "$script"
   t0=$(date +%s)
-  output=$(sh "$script" 2>&1)
+  output=$($TEST_SHELL "$script" 2>&1)
   rc=$?
   t1=$(date +%s)
 
