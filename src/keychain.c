@@ -1806,6 +1806,155 @@ static int deliver_pending_file(const char *path, FILE *output)
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Delivery-confirmation gate
+//
+// The ciphertext this tool emits is raw XOR output: it carries no
+// sequence number, offset or length. Decryption simply consumes the
+// front of the decryption key by however many bytes arrive, so within
+// one direction the protocol is only correct if every message arrives in
+// the order it was sent, complete, exactly once. A message that is lost,
+// reordered, duplicated or truncated in transit makes the next decrypt
+// XOR against the wrong key range - producing garbage with exit code 0
+// while physically destroying the key bytes both messages needed, which
+// leaves them permanently unrecoverable.
+//
+// The program cannot see the transport, so that in-order property is
+// only verifiable by the correspondents themselves, out of band. This
+// gate makes that verification an enforced checkpoint instead of a
+// silent assumption: before key is spent on any message after the first
+// in a direction, the operator must confirm on the terminal that the
+// previous message in that direction arrived and decoded correctly.
+// Anything but an explicit yes cancels the operation.
+//
+// Placement in the callers is load-bearing: the prompt runs after the
+// output is fully staged and verified but BEFORE commit_publish - i.e.
+// before the first of the three durable commit steps - so a "no" (or an
+// unanswerable prompt) aborts with the staging file as the only thing to
+// discard and provably zero key consumed.
+//
+// The answer is read from the controlling terminal (otp_open_tty), never
+// from stdin, which carries the message payload itself. With no terminal
+// available the operation fails closed - assuming "yes" in exactly the
+// unattended contexts most likely to replay or reorder input would gut
+// the protection. Scripts state the confirmation explicitly instead,
+// with -y/--assume-delivered or OTP_ASSUME_DELIVERED=1.
+// ---------------------------------------------------------------------------
+
+static int g_assume_delivered = 0;
+
+void keychain_set_assume_delivered(int yes)
+{
+  g_assume_delivered = yes;
+}
+
+// Returns 0 when the operation may proceed and -1 when it must be
+// cancelled. `prev_seq` is the sequence number of the last committed
+// message in this direction (0 = none yet, nothing to confirm) and
+// `next_off` is where that message's key range ended, which is exactly
+// where this one's begins.
+static int confirm_previous_delivery(const char *contact_name, int is_encrypt,
+                                     size_t prev_seq, time_t prev_when,
+                                     size_t next_seq, size_t next_off,
+                                     size_t next_len)
+{
+  if (g_assume_delivered || getenv("OTP_ASSUME_DELIVERED"))
+    return 0;
+  if (prev_seq == 0)
+    return 0; // first message in this direction - nothing to confirm yet
+
+  char when[64];
+  if (prev_when > 0)
+  {
+    struct tm tm_struct;
+#ifdef _WIN32
+    localtime_s(&tm_struct, &prev_when);
+#else
+    localtime_r(&prev_when, &tm_struct);
+#endif
+    strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm_struct);
+  }
+  else
+  {
+    snprintf(when, sizeof(when), "unknown time");
+  }
+
+  fprintf(stderr,
+          "Confirmation required for contact '%s' before more key is spent.\n"
+          "  Previous %s message: #%zu, %s %s, key consumed up to offset %zu.\n"
+          "  This run will %s message #%zu using key bytes %zu-%zu (%zu bytes),\n"
+          "  which are destroyed after use.\n",
+          contact_name,
+          is_encrypt ? "sent" : "received",
+          prev_seq,
+          is_encrypt ? "sent" : "received",
+          when, next_off,
+          is_encrypt ? "encrypt" : "decrypt",
+          next_seq, next_off, next_off + next_len, next_len);
+
+  char answer[16] = {0};
+
+  // Test-only injection of the operator's answer, in the same family as
+  // the other OTP_TEST_* hooks: it stands in for the terminal read below
+  // so tests can exercise both answers deterministically. A no-op when
+  // unset. OTP_TEST_NO_TTY likewise simulates a process with no
+  // controlling terminal, to prove the fail-closed branch.
+  const char *test_answer = getenv("OTP_TEST_CONFIRM_ANSWER");
+  if (test_answer)
+  {
+    snprintf(answer, sizeof(answer), "%s", test_answer);
+  }
+  else
+  {
+    FILE *tty = getenv("OTP_TEST_NO_TTY") ? NULL : otp_open_tty();
+    if (!tty)
+    {
+      fprintf(stderr,
+              "Error: this confirmation must be answered on the terminal (stdin carries the "
+              "message data), and no terminal is available. Confirm with your correspondent "
+              "out of band that the previous message arrived intact, then re-run with "
+              "-y/--assume-delivered (or OTP_ASSUME_DELIVERED=1). Cancelled; no key material "
+              "was consumed.\n");
+      return -1;
+    }
+    fprintf(stderr,
+            "Was the previous message delivered and decoded correctly? [y/N]: ");
+    if (!fgets(answer, sizeof(answer), tty))
+      answer[0] = '\0'; // EOF on the terminal counts as "no"
+    fclose(tty);
+  }
+
+  // Accept y/yes in any case; anything else - including an empty answer -
+  // is "no". The default must be the safe direction.
+  size_t len = strlen(answer);
+  while (len > 0 && (answer[len - 1] == '\n' || answer[len - 1] == '\r'))
+    answer[--len] = '\0';
+  for (size_t i = 0; i < len; i++)
+    if (answer[i] >= 'A' && answer[i] <= 'Z')
+      answer[i] += 'a' - 'A';
+  if (strcmp(answer, "y") == 0 || strcmp(answer, "yes") == 0)
+    return 0;
+
+  if (is_encrypt)
+  {
+    fprintf(stderr,
+            "Cancelled; no key material was consumed. If the previous ciphertext was lost in "
+            "transit, re-send the saved ciphertext file - its bytes are still valid for the "
+            "recipient's current key position. If the recipient decrypted it to garbage, this "
+            "direction is out of sync: re-key the contact (remove and re-add with fresh keys) "
+            "before sending anything else.\n");
+  }
+  else
+  {
+    fprintf(stderr,
+            "Cancelled; no key material was consumed. If the previous message decrypted to "
+            "garbage, this direction is out of sync (a message was lost, reordered, duplicated "
+            "or truncated in transit): re-key the contact (remove and re-add with fresh keys) "
+            "before decrypting anything else.\n");
+  }
+  return -1;
+}
+
 // Reconcile the remaining-key size recorded in metadata against the key
 // file's actual size, and adopt the file's.
 //
@@ -2189,6 +2338,19 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   size_t new_sequence = c->EncryptedSequence + 1;
   size_t range_offset = c->EncryptionKeyOffset;
 
+  // Delivery-confirmation gate: the operator must vouch that the previous
+  // message reached the other side intact before this one's key range is
+  // spent. Runs after staging so the exact range can be shown, but before
+  // commit_publish - the first durable step - so cancelling only has the
+  // staging file to discard and provably consumes no key.
+  if (confirm_previous_delivery(contact_name, 1, c->EncryptedSequence,
+                                c->LastMessageSentAt, new_sequence,
+                                range_offset, total_bytes) != 0)
+  {
+    commit_discard_path(stage.tmp_path);
+    return -1;
+  }
+
   // Publish the verified ciphertext under its final, key-range-tagged
   // name. Nothing has been declared "spent" yet - this is just durable
   // evidence, safe to exist independently of what happens next.
@@ -2512,6 +2674,20 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
 
   size_t new_sequence = c->DecryptedSequence + 1;
   size_t range_offset = c->DecryptionKeyOffset;
+
+  // Same delivery-confirmation gate as the encrypt side, and it matters
+  // even more here: decrypting input that is out of order, duplicated or
+  // truncated would XOR against the wrong key range, emit garbage with
+  // exit 0, and destroy the key bytes the real message needs. Confirming
+  // the previous plaintext was correct caps a desynchronized channel at
+  // one bad message instead of a silent cascade.
+  if (confirm_previous_delivery(contact_name, 0, c->DecryptedSequence,
+                                c->LastMessageReceivedAt, new_sequence,
+                                range_offset, total_bytes) != 0)
+  {
+    commit_discard_path(stage.tmp_path);
+    return -1;
+  }
 
   char pending_final_path[600];
   commit_pending_path(keychain_dir, contact_name, "dec", new_sequence,

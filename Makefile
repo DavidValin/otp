@@ -34,6 +34,7 @@ build:
 	@bash test/commit.test.sh
 	@bash test/lock.test.sh
 	@bash test/metadata.test.sh
+	@bash test/confirm.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -65,6 +66,7 @@ musl:
 	@bash test/commit.test.sh
 	@bash test/lock.test.sh
 	@bash test/metadata.test.sh
+	@bash test/confirm.test.sh
 	@echo " - Tested!"
 	@echo
 

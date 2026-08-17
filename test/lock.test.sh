@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# These tests exercise machinery other than the delivery-confirmation gate
+# (see test/confirm.test.sh for that), so state the confirmation explicitly:
+# without it, every message after a direction's first would prompt on the
+# terminal - or fail closed when the test runs without one.
+OTP_ASSUME_DELIVERED=1
+export OTP_ASSUME_DELIVERED
+
 # Per-contact locking tests.
 #
 # encrypt/decrypt for the same contact must be mutually exclusive: two

@@ -76,6 +76,20 @@ void show_contact(const char *name);
 int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 
+// Delivery-confirmation gate. The wire format carries no key-range tag,
+// so within one direction messages are only decryptable if they arrive in
+// order, complete, exactly once - a property only the correspondents can
+// verify, out of band. Before spending key on any message after the first
+// in a direction, the operator is therefore asked on the terminal to
+// confirm the previous message arrived intact; answering anything but
+// yes cancels the operation with no key consumed. Passing 1 here (set
+// from the -y/--assume-delivered flag; the OTP_ASSUME_DELIVERED
+// environment variable is equivalent) records that the operator already
+// confirmed out of band, so the prompt is skipped. Required for
+// non-interactive use: with no terminal to ask on, the operation fails
+// closed rather than assuming delivery.
+void keychain_set_assume_delivered(int yes);
+
 // Helper functions
 Contact *find_contact(const char *name);
 void init_keychain(void);

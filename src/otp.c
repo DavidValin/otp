@@ -155,7 +155,7 @@ int main(int argc, char *argv[])
 
   if (argc >= 2 && (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0))
   {
-    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n\n");
+    puts("\nThis program takes stdin, xor's it with a key file, outputs the result to stdout and creates a new file containing the part of the key file that was not used, named after the key file with a timestamp and a \".next\" suffix.\n\nUses:\n  Encrypt (using key file):\n    echo \"plain\" | otp KEY_FILE.txt > cipher.txt\n  \n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using key file):\n    cat cipher.txt | otp KEY_FILE.txt > plain.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n\nKeychain Commands:\n  --add-contact <name> [<enc_key_file> <dec_key_file>] (or -ac)\n\tAdd a contact to the keychain (optionally with key files)\n  --remove-contact <name> (or -rc)\tRemove a contact from the keychain\n  --has-contact <name> (or -hc)\tCheck if a contact exists\n  --list-contacts (or -lc)\t\tList all contacts\n  --show-contact <name> (or -sc)\tShow contact details\n  --contact <name> --encrypt (or -c)\tEncrypt using contact's encryption key\n  --contact <name> --decrypt (or -c)\tDecrypt using contact's decryption key\n  -y (or --assume-delivered)\t\tSkip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available.\n\n");
     return 0;
   }
 
@@ -253,7 +253,7 @@ int main(int argc, char *argv[])
     if (argc < 4)
     {
       fprintf(stderr, "Error: -c option requires contact name and --encrypt or --decrypt flag\n");
-      fprintf(stderr, "Usage: otp -c <contact_name> --encrypt|--decrypt\n");
+      fprintf(stderr, "Usage: otp -c <contact_name> --encrypt|--decrypt [-y|--assume-delivered]\n");
       return 1;
     }
   }
@@ -274,6 +274,14 @@ int main(int argc, char *argv[])
       else if (strcmp(argv[i], "--decrypt") == 0)
       {
         is_decrypt = 1;
+      }
+      else if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--assume-delivered") == 0)
+      {
+        /* The operator confirmed out of band that the previous message in
+         * this direction arrived intact, so the interactive
+         * delivery-confirmation prompt is skipped. Required for scripts:
+         * with no terminal to ask on, the gate fails closed. */
+        keychain_set_assume_delivered(1);
       }
     }
 

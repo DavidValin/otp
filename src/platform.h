@@ -197,6 +197,19 @@ static inline int otp_fseek(FILE *f, unsigned long long offset)
   return _fseeki64(f, (__int64)offset, SEEK_SET);
 }
 
+/* Open the controlling terminal for reading an interactive answer. This
+ * exists because stdin cannot serve that role here: stdin carries the
+ * message payload itself, so a confirmation prompt that read stdin would
+ * consume ciphertext bytes as its "answer". Returns NULL when the process
+ * has no terminal (a pipe-only script, cron), which callers must treat as
+ * "cannot ask" - never as "assume yes". CONIN$ is the Win32 name for the
+ * console input of the attached console, the moral equivalent of
+ * /dev/tty; like /dev/tty it fails to open when there is no console. */
+static inline FILE *otp_open_tty(void)
+{
+  return fopen("CONIN$", "r");
+}
+
 #else /* POSIX: real, unmodified system headers - no behavior change here */
 
 #include <dirent.h>
@@ -226,6 +239,15 @@ static inline int otp_file_size(const char *path, unsigned long long *out)
 static inline int otp_fseek(FILE *f, unsigned long long offset)
 {
   return fseeko(f, (off_t)offset, SEEK_SET);
+}
+
+/* See the Windows branch: the answer to an interactive confirmation must
+ * come from the terminal, never from stdin, which carries the message
+ * payload. NULL means "no terminal available", which callers must treat
+ * as "cannot ask", never as "assume yes". */
+static inline FILE *otp_open_tty(void)
+{
+  return fopen("/dev/tty", "r");
 }
 
 #endif /* _WIN32 */

@@ -210,6 +210,8 @@ The one-time pad is the only encryption scheme with a proof of perfect secrecy, 
 
 Requirement 1 is a property of how the key is generated, and is outside this tool's control beyond `--new-key-pair`. Requirement 2 is a property of how the key is *consumed*, and is what everything below exists to enforce.
 
+Requirement 2 also has a transport-side corollary the tool cannot verify by itself: ciphertext carries no key-range tag, so within one direction messages must be decrypted in the exact order they were sent, complete, exactly once. A message lost, reordered, duplicated or truncated in transit would make the next decrypt use the wrong key range - emitting garbage with exit code 0 while destroying the key bytes the real messages needed. Only the correspondents can confirm delivery, out of band, so `otp` makes that an enforced checkpoint: before spending key on any message after a direction's first, it asks on the terminal (never on `stdin`, which carries the message itself) whether the previous message in that direction - identified by its sequence number, date, and key offset - arrived and decoded correctly, and cancels with the keys untouched unless answered yes. Once you have confirmed out of band, pass `-y`/`--assume-delivered` (or set `OTP_ASSUME_DELIVERED=1`) to skip the prompt; scripts must do so explicitly, because with no terminal to ask on the operation fails closed rather than assuming delivery. Crash-recovery redelivery is never gated - it re-emits already-committed output and consumes no new key.
+
 ## Accidental mid-crash protection
 
 The one-time pad requires that the key portion used to encrypt a plaintext is never reused. Although this seems straightforward to implement, there are accidents along the way - a `kill -9`, a power cut, a full disk, a broken pipe, two invocations racing - and almost all of them land in the gap between *"the message has been produced"* and *"the key has been recorded as spent"*. Anything that leaves that gap open reopens requirement 2.
@@ -329,8 +331,8 @@ Read a row across and the inversion is the whole point: the file Alice consumes 
 Two independent keys remove that problem by construction. The outgoing and incoming directions consume entirely different files, tracked by entirely separate offsets and sequence numbers (`EncryptionKeyOffset`/`EncryptedSequence` versus `DecryptionKeyOffset`/`DecryptedSequence` in `<contact>.meta`). So:
 
 - Alice can send while Bob is sending. Messages may cross in flight; neither consumes key material the other is using.
-- Neither side ever waits for, acknowledges, or is even aware of the other's activity. There is **no coordination between the two machines at all** - not even a shared counter.
-- Messages can arrive out of order, be delayed indefinitely, or be delivered over completely different channels. Each is decrypted with the key range recorded in its own direction.
+- Neither machine ever waits for or is even aware of the other's activity. There is **no protocol-level coordination between the two machines at all** - not even a shared counter.
+- The independence is between the two *directions*, not within one: ciphertext carries no key-range tag, so each direction's messages must still be decrypted in the exact order they were sent, complete, exactly once. That in-order property is what the delivery-confirmation prompt (see [One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)) makes each operator vouch for before more key is spent.
 
 The only serialization is local and brief: on one machine, concurrent operations on the *same* contact take that contact's `.lock` (see [Per-contact locking](#per-contact-locking)), so two processes cannot draw from the same key file at once. Operations on *different* contacts share nothing and run fully in parallel.
 
