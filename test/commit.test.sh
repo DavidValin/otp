@@ -67,7 +67,7 @@ else
   exit 1
 fi
 
-PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l)
+PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$PENDING_COUNT" = "1" ]; then
   echo "     - ${GREEN}PASS${NC} - pending artifact was staged before the simulated crash"
 else
@@ -99,7 +99,7 @@ else
   exit 1
 fi
 
-PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l)
+PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$PENDING_COUNT" = "0" ]; then
   echo "     - ${GREEN}PASS${NC} - stale pending artifact removed"
 else
@@ -204,7 +204,7 @@ else
   exit 1
 fi
 
-PENDING_COUNT=$(ls .keychain/committest2_enc_pending_* 2>/dev/null | wc -l)
+PENDING_COUNT=$(ls .keychain/committest2_enc_pending_* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$PENDING_COUNT" = "0" ]; then
   echo "     - ${GREEN}PASS${NC} - pending artifact cleaned up after redelivery"
 else
@@ -291,7 +291,7 @@ else
   exit 1
 fi
 
-PENDING_COUNT=$(ls .keychain/committest3_enc_pending_* 2>/dev/null | wc -l)
+PENDING_COUNT=$(ls .keychain/committest3_enc_pending_* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$PENDING_COUNT" = "0" ]; then
   echo "     - ${GREEN}PASS${NC} - pending artifact cleaned up after redelivery"
 else

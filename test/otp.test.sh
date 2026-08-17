@@ -81,7 +81,7 @@ for f in encryption_${PARTA}.txt decryption_${PARTA}.txt encryption_${PARTB}.txt
     exit 1
   fi
   # Verify size
-  sz=$(wc -c < "${f}" 2>/dev/null)
+  sz=$(wc -c < "${f}" 2>/dev/null | tr -d ' ')
   if [ "$sz" -ne $((KEY_SIZE_MB*1024*1024)) ]; then
     echo "     ! ${RED}FAIL${NC} - key file ${f} size $sz does not match expected $((KEY_SIZE_MB*1024*1024))"
     exit 1
