@@ -127,6 +127,8 @@ The keychain uses a streaming architecture that supports extremely large keys (u
 .IP \(bu 3
 \fB<contact>.lock\fP \- a per-contact lock file used to serialize concurrent operations on the same contact
 .IP \(bu 3
+\fB<contact>.last_sent\fP and \fB<contact>.last_received\fP \- an exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed.  Removed automatically by otp - the user never has to delete it by hand - when the next operation in that direction confirms delivery (interactive "yes" or -y/--assume-delivered); when delivery is rejected instead, otp offers to recover the copy to a file of your choosing.  Deleted together with the contact.
+.IP \(bu 3
 Keys are read and processed in 4 MB chunks during encryption/decryption, enabling support for terabyte-sized keys without memory constraints
 .IP \(bu 3
 Everything otp creates inside \fB.keychain/\fP is created mode 0600, key files included

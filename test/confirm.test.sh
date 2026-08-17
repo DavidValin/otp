@@ -132,6 +132,66 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+#  the prompt warns about the offset-desync risk, naming the contact, and
+#  is colored (red header/warning, yellow contact name) only when stderr
+#  is a terminal
+# -----------------------------------------------------------------------------
+
+echo "     Testing prompt warning and colors..."
+
+# confirm_err.log still holds the prompt from the rejection run above
+if grep -q "WARNING: If confirm1 hasn't received the previous message" confirm_err.log; then
+  echo "     - ${GREEN}PASS${NC} - encrypt prompt warns about the offset-desync risk"
+else
+  echo "     ! ${RED}FAIL${NC} - offset-desync warning missing from the encrypt prompt"
+  cat confirm_err.log
+  exit 1
+fi
+
+if grep -q "Cancelled! No key material was consumed" confirm_err.log; then
+  echo "     - ${GREEN}PASS${NC} - rejection announces itself with Cancelled!"
+else
+  echo "     ! ${RED}FAIL${NC} - Cancelled! missing from the rejection message"
+  cat confirm_err.log
+  exit 1
+fi
+
+CONF_ESC=$(printf '\033')
+if grep -q "$CONF_ESC" confirm_err.log; then
+  echo "     ! ${RED}FAIL${NC} - ANSI escapes leaked into captured (non-terminal) stderr"
+  exit 1
+else
+  echo "     - ${GREEN}PASS${NC} - captured prompt is plain text"
+fi
+
+# On a pseudo-terminal the prompt must carry the colors. The piped
+# answers feed the two terminal questions in order: "n" rejects delivery,
+# the second "n" declines the recovery offer.
+CONF_TTY_TESTED=""
+if script --version 2>/dev/null | grep -q util-linux; then
+  printf 'n\nn\n' | script -qec "./bin/otp -c confirm1 --encrypt < confirm_plain3.txt" confirm_tty.log > /dev/null 2>&1
+  CONF_TTY_TESTED=1
+elif [ "$(uname)" = "Darwin" ]; then
+  printf 'n\nn\n' | script -q confirm_tty.log sh -c "./bin/otp -c confirm1 --encrypt < confirm_plain3.txt" > /dev/null 2>&1
+  CONF_TTY_TESTED=1
+fi
+
+if [ -z "$CONF_TTY_TESTED" ]; then
+  echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
+elif grep -aq "${CONF_ESC}\[31mConfirmation required" confirm_tty.log &&
+     grep -aq "${CONF_ESC}\[33mconfirm1" confirm_tty.log &&
+     grep -aq "${CONF_ESC}\[31mWARNING: If" confirm_tty.log &&
+     grep -aq "decoded correctly by ${CONF_ESC}\[33mconfirm1" confirm_tty.log &&
+     grep -aq "${CONF_ESC}\[31mCancelled!" confirm_tty.log; then
+  echo "     - ${GREEN}PASS${NC} - prompt colored on a terminal: red header/warning/Cancelled!, yellow contact"
+else
+  echo "     ! ${RED}FAIL${NC} - expected red/yellow coloring in the terminal prompt"
+  cat -v confirm_tty.log
+  exit 1
+fi
+rm -f confirm_tty.log
+
+# -----------------------------------------------------------------------------
 #  with no terminal and no -y the gate must fail closed, not assume yes -
 #  unattended contexts are exactly where replayed/reordered input happens
 # -----------------------------------------------------------------------------
@@ -221,6 +281,15 @@ if [ $? -ne 0 ] && [ ! -s confirm_dout2.txt ] &&
   echo "     - ${GREEN}PASS${NC} - decrypt cancelled on 'n', decryption key intact"
 else
   echo "     ! ${RED}FAIL${NC} - decrypt cancel must consume no key and emit nothing"
+  cat confirm_err.log
+  exit 1
+fi
+
+# the decrypt-side prompt carries the mirrored offset-desync warning
+if grep -q "WARNING: If the previous message from confirm2 was not decoded correctly" confirm_err.log; then
+  echo "     - ${GREEN}PASS${NC} - decrypt prompt warns about the offset-desync risk"
+else
+  echo "     ! ${RED}FAIL${NC} - offset-desync warning missing from the decrypt prompt"
   cat confirm_err.log
   exit 1
 fi

@@ -154,6 +154,7 @@ During an operation, and after an interrupted one, you may also see:
 | `<contact>_<dir>_pending.<pid>.tmp` | transient | Output still being staged. Never verified or published, so it carries no recoverable meaning; swept away by the next operation on that contact and direction. On the decrypt side it holds plaintext. |
 | `<contact>_enc.key.tmp`<br>`<contact>_dec.key.tmp` | transient | The post-truncation key file, staged and verified before being renamed over the real one. |
 | `<contact>.meta.tmp` | transient | The metadata file, staged and verified the same way. |
+| `<contact>.last_sent`<br>`<contact>.last_received` | until next confirmed operation | An exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed. `otp` removes it **automatically** - no manual cleanup is ever needed - the moment the next operation in that direction confirms delivery (interactive "yes" or `-y`); if delivery is instead rejected, `otp` offers to recover the copy to a file of your choosing. Deleted with the contact. |
 
 `<dir>` is `enc` or `dec`. Every transient file is either published by an atomic `rename()` or cleaned up; none of them is ever the only copy of anything that matters. Seeing one after a crash is normal - the next `otp -c <contact>` call reconciles it.
 
@@ -279,7 +280,7 @@ Everything `otp` creates itself is mode `0600` (and the `.keychain/` directory `
 
 | Mode | Files created | Where |
 |---|---|---|
-| Keychain (`-c`, `-ac`, `-rc`) | `<contact>.meta`, `<contact>_enc.key`, `<contact>_dec.key`, `<contact>.lock`, plus the transient staging and pending files - see [The `.keychain/` directory](#the-keychain-directory) for the full table | `.keychain/` in the current directory |
+| Keychain (`-c`, `-ac`, `-rc`) | `<contact>.meta`, `<contact>_enc.key`, `<contact>_dec.key`, `<contact>.lock`, `<contact>.last_sent`/`<contact>.last_received` (safety copy of the last delivered payload, removed automatically by `otp` once the next operation confirms delivery), plus the transient staging and pending files - see [The `.keychain/` directory](#the-keychain-directory) for the full table | `.keychain/` in the current directory |
 | Key-pair generation (`-nk`) | `<a>_keys/encryption_for_<b>.key`, `<a>_keys/decryption_from_<b>.key`, `<b>_keys/encryption_for_<a>.key`, `<b>_keys/decryption_from_<a>.key` (the `<name>_keys/` directories are created `0700`) | current directory |
 | Direct key file (`otp <keyfile>`) | `<keyfile>.YYYY-MM-DD_HH-MM-SS.next` | alongside the key file |
 

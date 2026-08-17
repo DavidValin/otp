@@ -73,10 +73,12 @@
 #define keychain_stderr_is_tty() isatty(fileno(stderr))
 #endif
 
-// ANSI color for the post-delivery report; emitted only when stderr
-// itself is a terminal, so captured or redirected stderr stays plain
-// text for scripts and logs.
+// ANSI colors for the post-delivery report and the delivery-confirmation
+// prompt; emitted only when stderr itself is a terminal, so captured or
+// redirected stderr stays plain text for scripts and logs.
 #define KEYCHAIN_GREEN "\x1b[32m"
+#define KEYCHAIN_RED "\x1b[31m"
+#define KEYCHAIN_YELLOW "\x1b[33m"
 #define KEYCHAIN_RESET "\x1b[0m"
 
 // Global keychain instance
@@ -1615,6 +1617,11 @@ int add_contact_with_keys(const char *name, const char *encryption_key_file, con
 }
 
 // Remove a contact
+// Defined with the other last-payload-copy helpers further down; needed
+// here because remove_contact must delete a contact's kept copies too.
+static void last_copy_path(const char *keychain_dir, const char *contact_name,
+                           int is_encrypt, char *path, size_t path_size);
+
 int remove_contact(const char *name)
 {
   int index = -1;
@@ -1697,10 +1704,17 @@ int remove_contact(const char *name)
   }
 
   // Clean up any leftover staged pending artifacts for this contact so
-  // they don't linger in .keychain/ forever.
+  // they don't linger in .keychain/ forever, and the kept last-payload
+  // copies: removing a contact must take every trace of message content
+  // with it (the empty .lock file below is the one deliberate exception).
   if (have_dir)
   {
     commit_discard_all_pending(keychain_dir, name);
+    char last[600];
+    last_copy_path(keychain_dir, name, 1, last, sizeof(last));
+    unlink(last);
+    last_copy_path(keychain_dir, name, 0, last, sizeof(last));
+    unlink(last);
   }
 
   // Shift remaining contacts (in-memory bookkeeping only)
@@ -1854,6 +1868,230 @@ static int deliver_pending_file(const char *path, FILE *output)
 }
 
 // ---------------------------------------------------------------------------
+// Last-payload safety copies: <keychain_dir>/<contact>.last_sent (the
+// exact ciphertext the last encrypt wrote to stdout) and
+// <keychain_dir>/<contact>.last_received (the exact plaintext the last
+// decrypt wrote to stdout).
+//
+// The payload on stdout is the only product of an operation, and the key
+// bytes that produced it are destroyed in the same run - so a user who
+// forgets to redirect stdout (or loses the file) has lost the message
+// unrecoverably. Each operation therefore keeps its delivered payload as
+// a copy in the keychain directory. The copy is removed at the one
+// moment it is provably no longer needed: when the NEXT operation in the
+// same direction passes the delivery-confirmation gate (an interactive
+// "yes", or -y/OTP_ASSUME_DELIVERED, both of which assert the previous
+// message arrived intact). When the gate is instead answered "no", the
+// operator is offered recovery of the kept copy to a file of their
+// choosing, and the copy stays either way.
+// ---------------------------------------------------------------------------
+
+static void last_copy_path(const char *keychain_dir, const char *contact_name,
+                           int is_encrypt, char *path, size_t path_size)
+{
+  snprintf(path, path_size, "%s%c%s%s", keychain_dir, PATH_SEPARATOR, contact_name,
+           is_encrypt ? ".last_sent" : ".last_received");
+}
+
+// The delivery of the previous message in this direction has just been
+// confirmed, so its kept copy has served its purpose. Also runs for a
+// contact's first message (nothing to confirm): any copy present then is
+// a stale leftover from a removed contact of the same name.
+static void discard_confirmed_last_copy(const char *contact_name, int is_encrypt)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return;
+  char path[600];
+  last_copy_path(keychain_dir, contact_name, is_encrypt, path, sizeof(path));
+  remove(path);
+}
+
+// Keep the just-delivered payload (already durably on disk at
+// delivered_path, the published pending artifact) as this direction's
+// safety copy - a rename, so no payload bytes are re-read or re-written.
+// If the rename fails the artifact must still not stay behind under its
+// pending name: the next run's reconciliation would redeliver it as if
+// this delivery had never happened.
+static void keep_last_copy(const char *keychain_dir, const char *contact_name,
+                           int is_encrypt, const char *delivered_path)
+{
+  char last[600];
+  last_copy_path(keychain_dir, contact_name, is_encrypt, last, sizeof(last));
+  remove(last); // stale copy, if any; commit_publish also replaces atomically
+  if (commit_publish(delivered_path, last) != 0)
+  {
+    fprintf(stderr,
+            "Warning: could not keep a local copy of the delivered %s for '%s'; "
+            "if you did not save the output, it is not recoverable from the keychain.\n",
+            is_encrypt ? "ciphertext" : "plaintext", contact_name);
+    commit_discard_path(delivered_path);
+  }
+}
+
+// Normalize a y/N answer read from the terminal (or injected by a test
+// hook): trim the newline, lowercase, accept "y"/"yes". Anything else -
+// including an empty answer - is "no"; the default must be the safe
+// direction.
+static int answer_is_yes(char *answer)
+{
+  size_t len = strlen(answer);
+  while (len > 0 && (answer[len - 1] == '\n' || answer[len - 1] == '\r'))
+    answer[--len] = '\0';
+  for (size_t i = 0; i < len; i++)
+    if (answer[i] >= 'A' && answer[i] <= 'Z')
+      answer[i] += 'a' - 'A';
+  return strcmp(answer, "y") == 0 || strcmp(answer, "yes") == 0;
+}
+
+// Stream the kept copy to a caller-chosen destination file. The
+// destination is created fresh (O_EXCL, 0600): recovery must never
+// silently overwrite an existing file the user pointed at by mistake.
+static int recover_copy_to(const char *src, const char *dst)
+{
+  FILE *in = fopen(src, "rb");
+  if (!in)
+  {
+    fprintf(stderr, "Error: cannot open kept copy '%s': %s\n", src, strerror(errno));
+    return -1;
+  }
+  int fd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_BINARY_FLAG, 0600);
+  if (fd < 0)
+  {
+    fprintf(stderr, "Error: cannot create '%s': %s\n", dst, strerror(errno));
+    fclose(in);
+    return -1;
+  }
+  FILE *out = fdopen(fd, "wb");
+  if (!out)
+  {
+    fprintf(stderr, "Error: cannot write '%s': %s\n", dst, strerror(errno));
+    close(fd);
+    unlink(dst);
+    fclose(in);
+    return -1;
+  }
+
+  unsigned char buf[65536];
+  size_t n;
+  int failed = 0;
+  while (!failed && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+  {
+    if (fwrite(buf, 1, n, out) != n)
+      failed = 1;
+  }
+  if (ferror(in))
+    failed = 1;
+  // fsync before success: a recovery the user trusts must actually be on
+  // disk, for exactly the reasons copy_key_file() fsyncs key material.
+  if (!failed && (fflush(out) != 0 || otp_fsync(fileno(out)) != 0))
+    failed = 1;
+  if (fclose(out) != 0)
+    failed = 1;
+  fclose(in);
+  if (failed)
+  {
+    fprintf(stderr, "Error: failed writing '%s': %s\n", dst, strerror(errno));
+    unlink(dst);
+    return -1;
+  }
+  return 0;
+}
+
+// After a rejected delivery confirmation: offer to write the kept copy of
+// the previous message's payload to a file. Interactive like the gate
+// itself - the questions go to stderr and the answers are read from the
+// terminal, never stdin (which carries message data). Test hooks
+// OTP_TEST_RECOVER_ANSWER / OTP_TEST_RECOVER_PATH stand in for the two
+// terminal reads; when the gate's own answer was injected
+// (OTP_TEST_CONFIRM_ANSWER) but no recovery answer was, the offer
+// defaults to "no" rather than falling back to a real terminal - a test
+// run must never block on one.
+static void offer_recover_last_copy(const char *contact_name, int is_encrypt)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return;
+  char src[600];
+  last_copy_path(keychain_dir, contact_name, is_encrypt, src, sizeof(src));
+
+  unsigned long long src_size;
+  if (otp_file_size(src, &src_size) != 0)
+    return; // no kept copy (the previous operation predates this feature)
+
+  const char *what = is_encrypt ? "ciphertext" : "plaintext";
+  int test_mode = getenv("OTP_TEST_CONFIRM_ANSWER") != NULL;
+
+  char answer[16] = {0};
+  const char *test_answer = getenv("OTP_TEST_RECOVER_ANSWER");
+  if (test_answer)
+  {
+    snprintf(answer, sizeof(answer), "%s", test_answer);
+  }
+  else if (!test_mode)
+  {
+    FILE *tty = getenv("OTP_TEST_NO_TTY") ? NULL : otp_open_tty();
+    if (!tty)
+    {
+      fprintf(stderr, "A copy of that message's %s is kept at '%s'.\n", what, src);
+      return;
+    }
+    fprintf(stderr, "Recover the previous message's %s (%llu bytes) to a file? [y/N]: ",
+            what, src_size);
+    if (!fgets(answer, sizeof(answer), tty))
+      answer[0] = '\0';
+    fclose(tty);
+  }
+
+  if (!answer_is_yes(answer))
+  {
+    fprintf(stderr, "The %s copy is kept at '%s' until a later run confirms delivery.\n",
+            what, src);
+    return;
+  }
+
+  char dst[512] = {0};
+  const char *test_path = getenv("OTP_TEST_RECOVER_PATH");
+  if (test_path)
+  {
+    snprintf(dst, sizeof(dst), "%s", test_path);
+  }
+  else if (!test_mode)
+  {
+    FILE *tty = getenv("OTP_TEST_NO_TTY") ? NULL : otp_open_tty();
+    if (!tty)
+    {
+      fprintf(stderr, "A copy of that message's %s is kept at '%s'.\n", what, src);
+      return;
+    }
+    fprintf(stderr, "Path to recover the %s to: ", what);
+    if (!fgets(dst, sizeof(dst), tty))
+      dst[0] = '\0';
+    fclose(tty);
+  }
+  size_t dlen = strlen(dst);
+  while (dlen > 0 && (dst[dlen - 1] == '\n' || dst[dlen - 1] == '\r'))
+    dst[--dlen] = '\0';
+  if (dlen == 0)
+  {
+    fprintf(stderr, "No path given; the %s copy is kept at '%s'.\n", what, src);
+    return;
+  }
+
+  if (recover_copy_to(src, dst) == 0)
+  {
+    fprintf(stderr,
+            "Recovered %llu bytes of %s to '%s'. The kept copy remains at '%s' "
+            "until a later run confirms delivery.\n",
+            src_size, what, dst, src);
+  }
+  else
+  {
+    fprintf(stderr, "Recovery failed; the %s copy is still kept at '%s'.\n", what, src);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Delivery-confirmation gate
 //
 // The ciphertext this tool emits is raw XOR output: it carries no
@@ -1906,9 +2144,20 @@ static int confirm_previous_delivery(const char *contact_name, int is_encrypt,
                                      size_t next_len)
 {
   if (g_assume_delivered || getenv("OTP_ASSUME_DELIVERED"))
+  {
+    // -y is the operator's assertion that the previous message arrived
+    // intact - the same confirmation as an interactive "yes", so the
+    // kept copy of that message is no longer needed.
+    discard_confirmed_last_copy(contact_name, is_encrypt);
     return 0;
+  }
   if (prev_seq == 0)
-    return 0; // first message in this direction - nothing to confirm yet
+  {
+    // First message in this direction - nothing to confirm yet. Any kept
+    // copy present now is a stale leftover (removed contact, same name).
+    discard_confirmed_last_copy(contact_name, is_encrypt);
+    return 0;
+  }
 
   char when[64];
   if (prev_when > 0)
@@ -1926,18 +2175,42 @@ static int confirm_previous_delivery(const char *contact_name, int is_encrypt,
     snprintf(when, sizeof(when), "unknown time");
   }
 
+  // Colors only when stderr is a terminal (the prompt is interactive by
+  // nature, but tests capture it to files and must see plain text). The
+  // yellow contact name inside the red WARNING block switches straight
+  // from red to yellow and back - both are foreground colors, so no
+  // reset is needed in between.
+  int gate_tty = keychain_stderr_is_tty();
+  const char *red = gate_tty ? KEYCHAIN_RED : "";
+  const char *yellow = gate_tty ? KEYCHAIN_YELLOW : "";
+  const char *creset = gate_tty ? KEYCHAIN_RESET : "";
+
   fprintf(stderr,
-          "Confirmation required for contact '%s' before more key is spent.\n"
+          "%sConfirmation required%s for contact '%s%s%s' before more key is spent.\n"
           "  Previous %s message: #%zu, %s %s, key consumed up to offset %zu.\n"
           "  This run will %s message #%zu using key bytes %zu-%zu (%zu bytes),\n"
           "  which are destroyed after use.\n",
-          contact_name,
+          red, creset, yellow, contact_name, creset,
           is_encrypt ? "sent" : "received",
           prev_seq,
           is_encrypt ? "sent" : "received",
           when, next_off,
           is_encrypt ? "encrypt" : "decrypt",
           next_seq, next_off, next_off + next_len, next_len);
+  if (is_encrypt)
+  {
+    fprintf(stderr,
+            "  %sWARNING: If %s%s%s hasn't received the previous message and you send another\n"
+            "  one they might lose track of the correct offset to use%s\n",
+            red, yellow, contact_name, red, creset);
+  }
+  else
+  {
+    fprintf(stderr,
+            "  %sWARNING: If the previous message from %s%s%s was not decoded correctly and\n"
+            "  you decrypt another one you might lose track of the correct offset to use%s\n",
+            red, yellow, contact_name, red, creset);
+  }
 
   char answer[16] = {0};
 
@@ -1964,41 +2237,49 @@ static int confirm_previous_delivery(const char *contact_name, int is_encrypt,
               "was consumed.\n");
       return -1;
     }
-    fprintf(stderr,
-            "Was the previous message delivered and decoded correctly? [y/N]: ");
+    if (is_encrypt)
+      fprintf(stderr,
+              "Was the previous message delivered and decoded correctly by %s%s%s? [y/N]: ",
+              yellow, contact_name, creset);
+    else
+      fprintf(stderr,
+              "Was the previous message from %s%s%s delivered and decoded correctly? [y/N]: ",
+              yellow, contact_name, creset);
     if (!fgets(answer, sizeof(answer), tty))
       answer[0] = '\0'; // EOF on the terminal counts as "no"
     fclose(tty);
   }
 
-  // Accept y/yes in any case; anything else - including an empty answer -
-  // is "no". The default must be the safe direction.
-  size_t len = strlen(answer);
-  while (len > 0 && (answer[len - 1] == '\n' || answer[len - 1] == '\r'))
-    answer[--len] = '\0';
-  for (size_t i = 0; i < len; i++)
-    if (answer[i] >= 'A' && answer[i] <= 'Z')
-      answer[i] += 'a' - 'A';
-  if (strcmp(answer, "y") == 0 || strcmp(answer, "yes") == 0)
+  if (answer_is_yes(answer))
+  {
+    // Delivery of the previous message is confirmed; its kept copy has
+    // served its purpose.
+    discard_confirmed_last_copy(contact_name, is_encrypt);
     return 0;
+  }
 
   if (is_encrypt)
   {
     fprintf(stderr,
-            "Cancelled; no key material was consumed. If the previous ciphertext was lost in "
+            "\n\n%sCancelled!%s No key material was consumed. If the previous ciphertext was lost in "
             "transit, re-send the saved ciphertext file - its bytes are still valid for the "
             "recipient's current key position. If the recipient decrypted it to garbage, this "
             "direction is out of sync: re-key the contact (remove and re-add with fresh keys) "
-            "before sending anything else.\n");
+            "before sending anything else.\n",
+            red, creset);
   }
   else
   {
     fprintf(stderr,
-            "Cancelled; no key material was consumed. If the previous message decrypted to "
+            "\n\n%sCancelled!%s No key material was consumed. If the previous message decrypted to "
             "garbage, this direction is out of sync (a message was lost, reordered, duplicated "
             "or truncated in transit): re-key the contact (remove and re-add with fresh keys) "
-            "before decrypting anything else.\n");
+            "before decrypting anything else.\n",
+            red, creset);
   }
+  // The rejected message's payload may still be needed (e.g. to re-send
+  // the saved ciphertext); offer to write the kept copy to a file.
+  offer_recover_last_copy(contact_name, is_encrypt);
   return -1;
 }
 
@@ -2235,7 +2516,7 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
       fprintf(stderr, "Error: Failed to redeliver recovered ciphertext for '%s'\n", contact_name);
       return -1;
     }
-    commit_discard_path(rec.pending_path);
+    keep_last_copy(keychain_dir, contact_name, 1, rec.pending_path);
     return KEYCHAIN_REDELIVERED;
   }
 
@@ -2455,7 +2736,9 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
     fprintf(stderr, "Error: Failed to deliver encrypted data\n");
     return -1;
   }
-  commit_discard_path(pending_final_path);
+  // Keep the delivered ciphertext as .keychain/<contact>.last_sent until
+  // a later run confirms it arrived - see the last-payload block comment.
+  keep_last_copy(keychain_dir, contact_name, 1, pending_final_path);
 
   // Print info to stderr, separated from the ciphertext by a blank line
   // when both share the terminal, and in green when stderr is a terminal
@@ -2594,7 +2877,7 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
       fprintf(stderr, "Error: Failed to redeliver recovered plaintext for '%s'\n", contact_name);
       return -1;
     }
-    commit_discard_path(rec.pending_path);
+    keep_last_copy(keychain_dir, contact_name, 0, rec.pending_path);
     return KEYCHAIN_REDELIVERED;
   }
 
@@ -2798,7 +3081,9 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
     fprintf(stderr, "Error: Failed to deliver decrypted data\n");
     return -1;
   }
-  commit_discard_path(pending_final_path);
+  // Keep the delivered plaintext as .keychain/<contact>.last_received
+  // until a later run confirms it - see the last-payload block comment.
+  keep_last_copy(keychain_dir, contact_name, 0, pending_final_path);
 
   // Print info to stderr, separated from the plaintext by a blank line
   // when both share the terminal, and in green when stderr is a terminal
