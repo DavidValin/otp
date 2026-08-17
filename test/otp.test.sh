@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # plain:              16ag
 # key:                abcdefghijklmn  (first 4 bytes in ./test_data/test.txt file)
 # expected cipher:    PT
@@ -18,24 +25,24 @@ echo ""
 echo "   - Encryption / Decryption algorythm"
 
 if [ "$COMPUTED_CIPHER" = "$EXPECTED_CIPHER" ]; then
-  echo "     - PASS - output is correct"
+  echo "     - ${GREEN}PASS${NC} - output is correct"
 else
-  echo "     ! FAIL - Expected $EXPECTED_CIPHER but got $COMPUTED_CIPHER"
+  echo "     ! ${RED}FAIL${NC} - Expected $EXPECTED_CIPHER but got $COMPUTED_CIPHER"
   exit -1
 fi
 
 if test -f "./test/test_data/test.txt.$NOW.next"; then
-  echo "     - PASS - next key file was created"
+  echo "     - ${GREEN}PASS${NC} - next key file was created"
 else
-  echo "     - FAIL - next key file was NOT created!"
+  echo "     - ${RED}FAIL${NC} - next key file was NOT created!"
   exit -1
 fi
 
 export NEXT_KEY=`cat ./test/test_data/test.txt.$NOW.next`
 if [ "$NEXT_KEY" = "$EXPECTED_NEXT_KEY" ]; then
-  echo "     - PASS - next key file has correct key (content)"
+  echo "     - ${GREEN}PASS${NC} - next key file has correct key (content)"
 else
-  echo "     ! FAIL - next key file has WRONG key (content), expected '$EXPECTED_NEXT_KEY' but got '$NEXT_KEY'"
+  echo "     ! ${RED}FAIL${NC} - next key file has WRONG key (content), expected '$EXPECTED_NEXT_KEY' but got '$NEXT_KEY'"
   exit -1
 fi
 
@@ -43,9 +50,9 @@ rm ./test/test_data/test.txt.$NOW.next
 
 export COMPUTED_PLAN_FROM_CIPHER=`printf '%s' $COMPUTED_CIPHER | ./bin/otp ./test/test_data/test.txt`
 if [ "$COMPUTED_PLAN_FROM_CIPHER" = "$PLAIN" ]; then
-  echo "     - PASS - decryption (content) is correct"
+  echo "     - ${GREEN}PASS${NC} - decryption (content) is correct"
 else
-  echo "     ! FAIL - decryption (content) is incorrect, expected '$PLAIN' but got '$COMPUTED_PLAN_FROM_CIPHER'"
+  echo "     ! ${RED}FAIL${NC} - decryption (content) is incorrect, expected '$PLAIN' but got '$COMPUTED_PLAN_FROM_CIPHER'"
   exit -1
 fi
 
@@ -67,16 +74,16 @@ rm tmpkey
 # Verify files exist
 for f in encryption_${PARTA}.txt decryption_${PARTA}.txt encryption_${PARTB}.txt decryption_${PARTB}.txt; do
   if [ ! -f "${f}" ]; then
-    echo "     ! FAIL - expected key file ${f} not found"
+    echo "     ! ${RED}FAIL${NC} - expected key file ${f} not found"
     exit -1
   fi
   # Verify size
   sz=$(wc -c < "${f}" 2>/dev/null)
   if [ "$sz" -ne $((KEY_SIZE_MB*1024*1024)) ]; then
-    echo "     ! FAIL - key file ${f} size $sz does not match expected $((KEY_SIZE_MB*1024*1024))"
+    echo "     ! ${RED}FAIL${NC} - key file ${f} size $sz does not match expected $((KEY_SIZE_MB*1024*1024))"
     exit -1
   fi
-  echo "     - PASS - ${f} exists and correct size"
+  echo "     - ${GREEN}PASS${NC} - ${f} exists and correct size"
 done
 
 # Verify cross assignment
@@ -86,14 +93,14 @@ encryption_b=$(cat encryption_${PARTB}.txt | base64 | tr -d '\n')
 decryption_b=$(cat decryption_${PARTB}.txt | base64 | tr -d '\n')
 
 if [ "$encryption_a" != "$decryption_b" ]; then
-  echo "     ! FAIL - encryption_${PARTA} does not match decryption_${PARTB}"
+  echo "     ! ${RED}FAIL${NC} - encryption_${PARTA} does not match decryption_${PARTB}"
   exit -1
 fi
 if [ "$decryption_a" != "$encryption_b" ]; then
-  echo "     ! FAIL - decryption_${PARTA} does not match encryption_${PARTB}"
+  echo "     ! ${RED}FAIL${NC} - decryption_${PARTA} does not match encryption_${PARTB}"
   exit -1
 fi
-echo "     - PASS - key pair is symetric"
+echo "     - ${GREEN}PASS${NC} - key pair is symetric"
 echo ""
 
 rm encryption_${PARTA}.txt decryption_${PARTA}.txt encryption_${PARTB}.txt decryption_${PARTB}.txt

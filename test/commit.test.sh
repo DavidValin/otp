@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # These tests exercise machinery other than the delivery-confirmation gate
 # (see test/confirm.test.sh for that), so state the confirmation explicitly:
 # without it, every message after a direction's first would prompt on the
@@ -54,17 +61,17 @@ printf 'hello window one' > commit_plain1.txt
 OTP_TEST_CRASH_POINT=after_pending_publish ./bin/otp -c committest1 --encrypt < commit_plain1.txt > /dev/null 2>commit_stderr1.log
 RC=$?
 if [ $RC -eq 77 ]; then
-  echo "     - PASS - simulated crash landed at the intended point"
+  echo "     - ${GREEN}PASS${NC} - simulated crash landed at the intended point"
 else
-  echo "     ! FAIL - simulated crash did not trigger as expected (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - simulated crash did not trigger as expected (exit $RC)"
   exit 1
 fi
 
 PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l)
 if [ "$PENDING_COUNT" = "1" ]; then
-  echo "     - PASS - pending artifact was staged before the simulated crash"
+  echo "     - ${GREEN}PASS${NC} - pending artifact was staged before the simulated crash"
 else
-  echo "     ! FAIL - expected exactly one pending artifact, found $PENDING_COUNT"
+  echo "     ! ${RED}FAIL${NC} - expected exactly one pending artifact, found $PENDING_COUNT"
   exit 1
 fi
 
@@ -72,9 +79,9 @@ OUTPUT=$(./bin/otp --show-contact committest1)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 0")
 OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: 0")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
-  echo "     - PASS - key state untouched after crash before any commit"
+  echo "     - ${GREEN}PASS${NC} - key state untouched after crash before any commit"
 else
-  echo "     ! FAIL - key state changed despite crash before any commit"
+  echo "     ! ${RED}FAIL${NC} - key state changed despite crash before any commit"
   exit 1
 fi
 
@@ -85,36 +92,36 @@ printf 'brand new real message' > commit_plain2.txt
 
 grep -q "discarded an uncommitted pending encryption" commit_stderr2.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - stale pending artifact reported as discarded"
+  echo "     - ${GREEN}PASS${NC} - stale pending artifact reported as discarded"
 else
-  echo "     ! FAIL - discard was not reported to the user"
+  echo "     ! ${RED}FAIL${NC} - discard was not reported to the user"
   cat commit_stderr2.log
   exit 1
 fi
 
 PENDING_COUNT=$(ls .keychain/committest1_enc_pending_* 2>/dev/null | wc -l)
 if [ "$PENDING_COUNT" = "0" ]; then
-  echo "     - PASS - stale pending artifact removed"
+  echo "     - ${GREEN}PASS${NC} - stale pending artifact removed"
 else
-  echo "     ! FAIL - stale pending artifact still present"
+  echo "     ! ${RED}FAIL${NC} - stale pending artifact still present"
   exit 1
 fi
 
 expected_cipher commit_key1.txt commit_plain2.txt 0 commit_expected2.bin
 cmp -s commit_cipher2.bin commit_expected2.bin
 if [ $? -eq 0 ]; then
-  echo "     - PASS - new message encrypted from the key's true start (nothing wasted or reused)"
+  echo "     - ${GREEN}PASS${NC} - new message encrypted from the key's true start (nothing wasted or reused)"
 else
-  echo "     ! FAIL - new message was not encrypted with the expected key bytes"
+  echo "     ! ${RED}FAIL${NC} - new message was not encrypted with the expected key bytes"
   exit 1
 fi
 
 OUTPUT=$(./bin/otp --show-contact committest1)
 echo "$OUTPUT" | grep -q "EncryptedSequence: 1"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - sequence advanced exactly once for the one real message"
+  echo "     - ${GREEN}PASS${NC} - sequence advanced exactly once for the one real message"
 else
-  echo "     ! FAIL - sequence did not advance correctly"
+  echo "     ! ${RED}FAIL${NC} - sequence did not advance correctly"
   exit 1
 fi
 
@@ -139,18 +146,18 @@ printf 'window two message content' > commit_plainA.txt
 OTP_TEST_CRASH_POINT=after_key_publish ./bin/otp -c committest2 --encrypt < commit_plainA.txt > /dev/null 2>commit_stderrA.log
 RC=$?
 if [ $RC -eq 77 ]; then
-  echo "     - PASS - simulated crash landed after the key file commit"
+  echo "     - ${GREEN}PASS${NC} - simulated crash landed after the key file commit"
 else
-  echo "     ! FAIL - simulated crash did not trigger as expected (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - simulated crash did not trigger as expected (exit $RC)"
   exit 1
 fi
 
 OUTPUT=$(./bin/otp --show-contact committest2)
 echo "$OUTPUT" | grep -q "EncryptedSequence: 0"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - metadata file is stale as expected (sequence not yet advanced)"
+  echo "     - ${GREEN}PASS${NC} - metadata file is stale as expected (sequence not yet advanced)"
 else
-  echo "     ! FAIL - metadata file should still show the pre-crash sequence"
+  echo "     ! ${RED}FAIL${NC} - metadata file should still show the pre-crash sequence"
   exit 1
 fi
 
@@ -158,9 +165,9 @@ MSGLEN=$(wc -c < commit_plainA.txt | tr -d ' ')
 ACTUAL_KEY_SIZE=$(wc -c < .keychain/committest2_enc.key | tr -d ' ')
 EXPECTED_REMAINING=$((1000 - MSGLEN))
 if [ "$ACTUAL_KEY_SIZE" = "$EXPECTED_REMAINING" ]; then
-  echo "     - PASS - key file already truncated on disk despite stale metadata"
+  echo "     - ${GREEN}PASS${NC} - key file already truncated on disk despite stale metadata"
 else
-  echo "     ! FAIL - key file truncation state unexpected ($ACTUAL_KEY_SIZE vs $EXPECTED_REMAINING)"
+  echo "     ! ${RED}FAIL${NC} - key file truncation state unexpected ($ACTUAL_KEY_SIZE vs $EXPECTED_REMAINING)"
   exit 1
 fi
 
@@ -172,18 +179,18 @@ printf 'this should be ignored during recovery' | ./bin/otp -c committest2 --enc
 
 grep -q "Recovered incomplete delivery" commit_stderrB.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - recovery reported to the user"
+  echo "     - ${GREEN}PASS${NC} - recovery reported to the user"
 else
-  echo "     ! FAIL - recovery was not reported"
+  echo "     ! ${RED}FAIL${NC} - recovery was not reported"
   cat commit_stderrB.log
   exit 1
 fi
 
 cmp -s commit_recoveredA.bin commit_expectedA.bin
 if [ $? -eq 0 ]; then
-  echo "     - PASS - redelivered ciphertext matches the original message exactly"
+  echo "     - ${GREEN}PASS${NC} - redelivered ciphertext matches the original message exactly"
 else
-  echo "     ! FAIL - redelivered ciphertext does not match"
+  echo "     ! ${RED}FAIL${NC} - redelivered ciphertext does not match"
   exit 1
 fi
 
@@ -191,17 +198,17 @@ OUTPUT=$(./bin/otp --show-contact committest2)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
 OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
-  echo "     - PASS - metadata commit was finished correctly by recovery"
+  echo "     - ${GREEN}PASS${NC} - metadata commit was finished correctly by recovery"
 else
-  echo "     ! FAIL - metadata was not finished correctly by recovery"
+  echo "     ! ${RED}FAIL${NC} - metadata was not finished correctly by recovery"
   exit 1
 fi
 
 PENDING_COUNT=$(ls .keychain/committest2_enc_pending_* 2>/dev/null | wc -l)
 if [ "$PENDING_COUNT" = "0" ]; then
-  echo "     - PASS - pending artifact cleaned up after redelivery"
+  echo "     - ${GREEN}PASS${NC} - pending artifact cleaned up after redelivery"
 else
-  echo "     ! FAIL - pending artifact left behind after redelivery"
+  echo "     ! ${RED}FAIL${NC} - pending artifact left behind after redelivery"
   exit 1
 fi
 
@@ -212,9 +219,9 @@ printf 'real new message after recovery' > commit_plainB.txt
 expected_cipher commit_key2.txt commit_plainB.txt "$MSGLEN" commit_expectedB.bin
 cmp -s commit_cipherB.bin commit_expectedB.bin
 if [ $? -eq 0 ]; then
-  echo "     - PASS - normal encryption resumed correctly after recovery"
+  echo "     - ${GREEN}PASS${NC} - normal encryption resumed correctly after recovery"
 else
-  echo "     ! FAIL - encryption after recovery used the wrong key range"
+  echo "     ! ${RED}FAIL${NC} - encryption after recovery used the wrong key range"
   exit 1
 fi
 
@@ -238,9 +245,9 @@ printf 'window three message' > commit_plainC.txt
 OTP_TEST_CRASH_POINT=after_keychain_save ./bin/otp -c committest3 --encrypt < commit_plainC.txt > /dev/null 2>commit_stderrC.log
 RC=$?
 if [ $RC -eq 77 ]; then
-  echo "     - PASS - simulated crash landed after the full commit"
+  echo "     - ${GREEN}PASS${NC} - simulated crash landed after the full commit"
 else
-  echo "     ! FAIL - simulated crash did not trigger as expected (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - simulated crash did not trigger as expected (exit $RC)"
   exit 1
 fi
 
@@ -249,9 +256,9 @@ OUTPUT=$(./bin/otp --show-contact committest3)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
 OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
-  echo "     - PASS - key state was already fully committed before the simulated crash"
+  echo "     - ${GREEN}PASS${NC} - key state was already fully committed before the simulated crash"
 else
-  echo "     ! FAIL - key state should already be fully committed at this crash point"
+  echo "     ! ${RED}FAIL${NC} - key state should already be fully committed at this crash point"
   exit 1
 fi
 
@@ -260,17 +267,17 @@ expected_cipher commit_key3.txt commit_plainC.txt 0 commit_expectedC.bin
 printf 'ignored input' | ./bin/otp -c committest3 --encrypt > commit_recoveredC.bin 2>commit_stderrD.log
 grep -q "Recovered incomplete delivery" commit_stderrD.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - recovery reported to the user"
+  echo "     - ${GREEN}PASS${NC} - recovery reported to the user"
 else
-  echo "     ! FAIL - recovery was not reported"
+  echo "     ! ${RED}FAIL${NC} - recovery was not reported"
   exit 1
 fi
 
 cmp -s commit_recoveredC.bin commit_expectedC.bin
 if [ $? -eq 0 ]; then
-  echo "     - PASS - redelivered ciphertext matches the original message exactly"
+  echo "     - ${GREEN}PASS${NC} - redelivered ciphertext matches the original message exactly"
 else
-  echo "     ! FAIL - redelivered ciphertext does not match"
+  echo "     ! ${RED}FAIL${NC} - redelivered ciphertext does not match"
   exit 1
 fi
 
@@ -278,17 +285,17 @@ OUTPUT=$(./bin/otp --show-contact committest3)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
 OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
-  echo "     - PASS - redelivery did not double-consume key material"
+  echo "     - ${GREEN}PASS${NC} - redelivery did not double-consume key material"
 else
-  echo "     ! FAIL - redelivery incorrectly changed key state again"
+  echo "     ! ${RED}FAIL${NC} - redelivery incorrectly changed key state again"
   exit 1
 fi
 
 PENDING_COUNT=$(ls .keychain/committest3_enc_pending_* 2>/dev/null | wc -l)
 if [ "$PENDING_COUNT" = "0" ]; then
-  echo "     - PASS - pending artifact cleaned up after redelivery"
+  echo "     - ${GREEN}PASS${NC} - pending artifact cleaned up after redelivery"
 else
-  echo "     ! FAIL - pending artifact left behind"
+  echo "     ! ${RED}FAIL${NC} - pending artifact left behind"
   exit 1
 fi
 
@@ -317,27 +324,27 @@ expected_cipher commit_deckey.txt.dec commit_decplain.txt 0 commit_deccipher.bin
 OTP_TEST_CRASH_POINT=after_key_publish ./bin/otp -c decrecover --decrypt < commit_deccipher.bin > /dev/null 2>commit_decstderr.log
 RC=$?
 if [ $RC -eq 77 ]; then
-  echo "     - PASS - simulated crash landed during decrypt commit"
+  echo "     - ${GREEN}PASS${NC} - simulated crash landed during decrypt commit"
 else
-  echo "     ! FAIL - simulated crash did not trigger as expected on decrypt (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - simulated crash did not trigger as expected on decrypt (exit $RC)"
   exit 1
 fi
 
 printf 'ignored' | ./bin/otp -c decrecover --decrypt > commit_decrecovered.bin 2>commit_decstderr2.log
 grep -q "Recovered incomplete delivery" commit_decstderr2.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - decrypt recovery reported to the user"
+  echo "     - ${GREEN}PASS${NC} - decrypt recovery reported to the user"
 else
-  echo "     ! FAIL - decrypt recovery was not reported"
+  echo "     ! ${RED}FAIL${NC} - decrypt recovery was not reported"
   cat commit_decstderr2.log
   exit 1
 fi
 
 cmp -s commit_decrecovered.bin commit_decplain.txt
 if [ $? -eq 0 ]; then
-  echo "     - PASS - recovered plaintext matches the original message exactly (no data loss)"
+  echo "     - ${GREEN}PASS${NC} - recovered plaintext matches the original message exactly (no data loss)"
 else
-  echo "     ! FAIL - recovered plaintext does not match - message would have been permanently lost"
+  echo "     ! ${RED}FAIL${NC} - recovered plaintext does not match - message would have been permanently lost"
   exit 1
 fi
 
@@ -368,9 +375,9 @@ printf 'second message, must not be silently dropped' > commit_rdsecond.txt
 RC=$?
 
 if [ $RC -eq 3 ]; then
-  echo "     - PASS - redelivery exits 3, distinguishable from success"
+  echo "     - ${GREEN}PASS${NC} - redelivery exits 3, distinguishable from success"
 else
-  echo "     ! FAIL - redelivery exited $RC (expected 3)"
+  echo "     ! ${RED}FAIL${NC} - redelivery exited $RC (expected 3)"
   exit 1
 fi
 
@@ -383,9 +390,9 @@ LEN2=$(wc -c < commit_rdsecond.txt | tr -d ' ')
 EXPECTED_OFF=$((LEN1 + LEN2))
 
 if [ $RC2 -eq 0 ] && [ "$OFF" = "$EXPECTED_OFF" ]; then
-  echo "     - PASS - re-running then processes the skipped input, consuming key exactly once"
+  echo "     - ${GREEN}PASS${NC} - re-running then processes the skipped input, consuming key exactly once"
 else
-  echo "     ! FAIL - re-run exited $RC2 with offset $OFF (expected 0 and $EXPECTED_OFF)"
+  echo "     ! ${RED}FAIL${NC} - re-run exited $RC2 with offset $OFF (expected 0 and $EXPECTED_OFF)"
   exit 1
 fi
 
@@ -416,9 +423,9 @@ printf 'a message' | ./bin/otp -c staged --encrypt > commit_stageout.bin 2>/dev/
 RC=$?
 
 if [ $RC -eq 0 ] && [ ! -f ".keychain/staged_enc_pending.99999.tmp" ]; then
-  echo "     - PASS - a stale encrypt staging file is swept on the next operation"
+  echo "     - ${GREEN}PASS${NC} - a stale encrypt staging file is swept on the next operation"
 else
-  echo "     ! FAIL - stale encrypt staging file survived (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - stale encrypt staging file survived (exit $RC)"
   ls .keychain/
   exit 1
 fi
@@ -426,9 +433,9 @@ fi
 # The decrypt-side one belongs to the other direction, so it survives an
 # encrypt - but removing the contact must take everything with it
 if [ -f ".keychain/staged_dec_pending.99999.tmp" ]; then
-  echo "     - PASS - the other direction's staging file is left for that direction to sweep"
+  echo "     - ${GREEN}PASS${NC} - the other direction's staging file is left for that direction to sweep"
 else
-  echo "     ! FAIL - encrypt swept a decrypt staging file it does not own"
+  echo "     ! ${RED}FAIL${NC} - encrypt swept a decrypt staging file it does not own"
   exit 1
 fi
 
@@ -439,9 +446,9 @@ fi
 ./bin/otp --remove-contact staged > /dev/null 2>&1
 LEFTOVER=$(ls .keychain/ 2>/dev/null | grep "^staged" | grep -vc "^staged\.lock$")
 if [ "$LEFTOVER" = "0" ]; then
-  echo "     - PASS - removing a contact leaves none of its staged content behind"
+  echo "     - ${GREEN}PASS${NC} - removing a contact leaves none of its staged content behind"
 else
-  echo "     ! FAIL - removing the contact left $LEFTOVER file(s) behind"
+  echo "     ! ${RED}FAIL${NC} - removing the contact left $LEFTOVER file(s) behind"
   ls .keychain/
   exit 1
 fi
@@ -471,18 +478,18 @@ printf 'heal me' | ./bin/otp -c healed --encrypt > commit_healout.bin 2>commit_h
 RC=$?
 
 if [ $RC -eq 0 ] && [ -s commit_healout.bin ]; then
-  echo "     - PASS - an overstated key size is corrected instead of failing forever"
+  echo "     - ${GREEN}PASS${NC} - an overstated key size is corrected instead of failing forever"
 else
-  echo "     ! FAIL - drifted metadata left the contact unusable (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - drifted metadata left the contact unusable (exit $RC)"
   cat commit_healstderr.log
   exit 1
 fi
 
 grep -q "adopting the key file's size" commit_healstderr.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the correction is reported rather than made silently"
+  echo "     - ${GREEN}PASS${NC} - the correction is reported rather than made silently"
 else
-  echo "     ! FAIL - the metadata correction was not reported"
+  echo "     ! ${RED}FAIL${NC} - the metadata correction was not reported"
   cat commit_healstderr.log
   exit 1
 fi
@@ -490,9 +497,9 @@ fi
 SIZE=$(grep '^EncryptionKeySize=' .keychain/healed.meta | cut -d= -f2)
 ACTUAL=$(wc -c < .keychain/healed_enc.key | tr -d ' ')
 if [ "$SIZE" = "$ACTUAL" ]; then
-  echo "     - PASS - metadata now agrees with the key file ($SIZE bytes)"
+  echo "     - ${GREEN}PASS${NC} - metadata now agrees with the key file ($SIZE bytes)"
 else
-  echo "     ! FAIL - metadata says $SIZE, key file holds $ACTUAL"
+  echo "     ! ${RED}FAIL${NC} - metadata says $SIZE, key file holds $ACTUAL"
   exit 1
 fi
 
@@ -504,17 +511,17 @@ cat commit_healkey.txt > .keychain/healed_enc.key
 printf 'should be refused' | ./bin/otp -c healed --encrypt > commit_healout2.bin 2>commit_healstderr2.log
 RC=$?
 if [ $RC -ne 0 ]; then
-  echo "     - PASS - a rolled-back (larger) key file is refused, not adopted"
+  echo "     - ${GREEN}PASS${NC} - a rolled-back (larger) key file is refused, not adopted"
 else
-  echo "     ! FAIL - a rolled-back key file was accepted - key material could be reused"
+  echo "     ! ${RED}FAIL${NC} - a rolled-back key file was accepted - key material could be reused"
   exit 1
 fi
 
 grep -q "restored or rolled back" commit_healstderr2.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal explains that key material was rolled back"
+  echo "     - ${GREEN}PASS${NC} - the refusal explains that key material was rolled back"
 else
-  echo "     ! FAIL - the refusal did not explain why"
+  echo "     ! ${RED}FAIL${NC} - the refusal did not explain why"
   cat commit_healstderr2.log
   exit 1
 fi
@@ -544,17 +551,17 @@ if [ -w /dev/full ]; then
   RC=$?
 
   if [ $RC -ne 0 ]; then
-    echo "     - PASS - delivery onto a full disk reports failure"
+    echo "     - ${GREEN}PASS${NC} - delivery onto a full disk reports failure"
   else
-    echo "     ! FAIL - delivery onto a full disk reported success (exit $RC)"
+    echo "     ! ${RED}FAIL${NC} - delivery onto a full disk reported success (exit $RC)"
     exit 1
   fi
 
   PENDING=$(ls .keychain/ 2>/dev/null | grep -c "fulldisk_enc_pending_seq")
   if [ "$PENDING" = "1" ]; then
-    echo "     - PASS - the verified copy is retained rather than deleted"
+    echo "     - ${GREEN}PASS${NC} - the verified copy is retained rather than deleted"
   else
-    echo "     ! FAIL - the verified copy was discarded after a failed delivery"
+    echo "     ! ${RED}FAIL${NC} - the verified copy was discarded after a failed delivery"
     ls .keychain/
     exit 1
   fi
@@ -566,9 +573,9 @@ if [ -w /dev/full ]; then
   cmp -s commit_fullout.bin commit_fullexp.bin
   CMP_RC=$?
   if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
-    echo "     - PASS - the message is redelivered byte-exact on the next run"
+    echo "     - ${GREEN}PASS${NC} - the message is redelivered byte-exact on the next run"
   else
-    echo "     ! FAIL - message not recovered after the failed delivery (exit $RC)"
+    echo "     ! ${RED}FAIL${NC} - message not recovered after the failed delivery (exit $RC)"
     exit 1
   fi
 
@@ -596,18 +603,18 @@ RC=$?
 OFFSET=$(grep '^EncryptionKeyOffset=' .keychain/readerr.meta | cut -d= -f2)
 
 if [ $RC -ne 0 ] && [ "$OFFSET" = "0" ]; then
-  echo "     - PASS - a failed read aborts without consuming key material"
+  echo "     - ${GREEN}PASS${NC} - a failed read aborts without consuming key material"
 else
-  echo "     ! FAIL - a failed read was treated as valid input (exit $RC, offset $OFFSET)"
+  echo "     ! ${RED}FAIL${NC} - a failed read was treated as valid input (exit $RC, offset $OFFSET)"
   cat commit_readerr.log
   exit 1
 fi
 
 grep -q "Failed reading input" commit_readerr.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the read failure is reported as such"
+  echo "     - ${GREEN}PASS${NC} - the read failure is reported as such"
 else
-  echo "     ! FAIL - the read failure was not reported"
+  echo "     ! ${RED}FAIL${NC} - the read failure was not reported"
   cat commit_readerr.log
   exit 1
 fi
@@ -640,18 +647,18 @@ OFF=$(grep '^EncryptionKeyOffset=' .keychain/verifytest.meta | cut -d= -f2)
 PEND=$(ls .keychain/ 2>/dev/null | grep -c "verifytest_enc_pending")
 
 if [ $RC -ne 0 ] && [ "$OFF" = "0" ] && [ "$PEND" = "0" ]; then
-  echo "     - PASS - a corrupted staged ciphertext is detected, nothing committed"
+  echo "     - ${GREEN}PASS${NC} - a corrupted staged ciphertext is detected, nothing committed"
 else
-  echo "     ! FAIL - corrupted staged ciphertext slipped through (exit $RC, offset $OFF, $PEND pending)"
+  echo "     ! ${RED}FAIL${NC} - corrupted staged ciphertext slipped through (exit $RC, offset $OFF, $PEND pending)"
   cat commit_verr1.log
   exit 1
 fi
 
 grep -q "verification failed for staged file" commit_verr1.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the failure names the staged file that failed verification"
+  echo "     - ${GREEN}PASS${NC} - the failure names the staged file that failed verification"
 else
-  echo "     ! FAIL - verification failure not reported"
+  echo "     ! ${RED}FAIL${NC} - verification failure not reported"
   cat commit_verr1.log
   exit 1
 fi
@@ -664,9 +671,9 @@ grep -q "verification failed for .keychain/verifytest.meta.tmp" commit_verr2.log
 GREP_RC=$?
 
 if [ $RC -ne 0 ] && [ $GREP_RC -eq 0 ]; then
-  echo "     - PASS - a corrupted staged .meta is detected before it is published"
+  echo "     - ${GREEN}PASS${NC} - a corrupted staged .meta is detected before it is published"
 else
-  echo "     ! FAIL - corrupted staged .meta slipped through (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - corrupted staged .meta slipped through (exit $RC)"
   cat commit_verr2.log
   exit 1
 fi
@@ -701,9 +708,9 @@ KEYSIZE=$(wc -c < .keychain/partialtest_enc.key | tr -d ' ')
 OFF=$(grep '^EncryptionKeyOffset=' .keychain/partialtest.meta | cut -d= -f2)
 
 if [ $RC -eq 77 ] && [ "$KEYSIZE" = "2000" ] && [ "$OFF" = "0" ]; then
-  echo "     - PASS - crash mid key-rewrite leaves the live key file untouched"
+  echo "     - ${GREEN}PASS${NC} - crash mid key-rewrite leaves the live key file untouched"
 else
-  echo "     ! FAIL - key file or metadata changed by an interrupted rewrite (exit $RC, size $KEYSIZE, offset $OFF)"
+  echo "     ! ${RED}FAIL${NC} - key file or metadata changed by an interrupted rewrite (exit $RC, size $KEYSIZE, offset $OFF)"
   exit 1
 fi
 
@@ -716,9 +723,9 @@ cmp -s commit_pout.bin commit_pexp.bin
 CMP_RC=$?
 
 if [ $RC -eq 0 ] && [ $CMP_RC -eq 0 ]; then
-  echo "     - PASS - the next run encrypts from the key's true start, nothing wasted"
+  echo "     - ${GREEN}PASS${NC} - the next run encrypts from the key's true start, nothing wasted"
 else
-  echo "     ! FAIL - recovery after an interrupted key rewrite was wrong (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - recovery after an interrupted key rewrite was wrong (exit $RC)"
   exit 1
 fi
 
@@ -740,16 +747,16 @@ SEQ=$(grep '^EncryptedSequence=' .keychain/metapartial.meta | cut -d= -f2)
 FIELDS=$(grep -c '=' .keychain/metapartial.meta)
 
 if [ $RC -eq 77 ] && [ "$KEYSIZE" = "$EXPECT_KEY" ] && [ "$SEQ" = "0" ]; then
-  echo "     - PASS - the live .meta is the intact previous version, not a partial write"
+  echo "     - ${GREEN}PASS${NC} - the live .meta is the intact previous version, not a partial write"
 else
-  echo "     ! FAIL - unexpected state after crash between staging and publishing .meta (exit $RC, key $KEYSIZE, seq $SEQ)"
+  echo "     ! ${RED}FAIL${NC} - unexpected state after crash between staging and publishing .meta (exit $RC, key $KEYSIZE, seq $SEQ)"
   exit 1
 fi
 
 if [ "$FIELDS" -ge 12 ]; then
-  echo "     - PASS - the live .meta still parses completely ($FIELDS fields)"
+  echo "     - ${GREEN}PASS${NC} - the live .meta still parses completely ($FIELDS fields)"
 else
-  echo "     ! FAIL - the live .meta looks truncated ($FIELDS fields)"
+  echo "     ! ${RED}FAIL${NC} - the live .meta looks truncated ($FIELDS fields)"
   cat .keychain/metapartial.meta
   exit 1
 fi
@@ -761,9 +768,9 @@ cmp -s commit_mout.bin commit_mexp.bin
 CMP_RC=$?
 
 if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
-  echo "     - PASS - recovery finishes the interrupted .meta commit and redelivers exactly"
+  echo "     - ${GREEN}PASS${NC} - recovery finishes the interrupted .meta commit and redelivers exactly"
 else
-  echo "     ! FAIL - recovery after an interrupted .meta commit was wrong (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - recovery after an interrupted .meta commit was wrong (exit $RC)"
   exit 1
 fi
 
@@ -794,9 +801,9 @@ OFF=$(grep '^DecryptionKeyOffset=' .keychain/decparity.meta | cut -d= -f2)
 OUTSIZE=$(wc -c < commit_dout.bin | tr -d ' ')
 
 if [ $RC -ne 0 ] && [ "$OFF" = "0" ] && [ "$OUTSIZE" = "0" ]; then
-  echo "     - PASS - oversized ciphertext is refused with no plaintext leaked and no key spent"
+  echo "     - ${GREEN}PASS${NC} - oversized ciphertext is refused with no plaintext leaked and no key spent"
 else
-  echo "     ! FAIL - oversized decrypt misbehaved (exit $RC, offset $OFF, $OUTSIZE bytes out)"
+  echo "     ! ${RED}FAIL${NC} - oversized decrypt misbehaved (exit $RC, offset $OFF, $OUTSIZE bytes out)"
   cat commit_derr1.log
   exit 1
 fi
@@ -812,9 +819,9 @@ SIZE=$(grep '^DecryptionKeySize=' .keychain/decparity.meta | cut -d= -f2)
 ACTUAL=$(wc -c < .keychain/decparity_dec.key | tr -d ' ')
 
 if [ $RC -eq 0 ] && [ $GREP_RC -eq 0 ] && [ "$SIZE" = "$ACTUAL" ]; then
-  echo "     - PASS - drifted decryption metadata self-heals toward the key file"
+  echo "     - ${GREEN}PASS${NC} - drifted decryption metadata self-heals toward the key file"
 else
-  echo "     ! FAIL - decrypt resync did not heal (exit $RC, meta $SIZE, actual $ACTUAL)"
+  echo "     ! ${RED}FAIL${NC} - decrypt resync did not heal (exit $RC, meta $SIZE, actual $ACTUAL)"
   cat commit_derr2.log
   exit 1
 fi
@@ -827,9 +834,9 @@ grep -q "restored or rolled back" commit_derr3.log
 GREP_RC=$?
 
 if [ $RC -ne 0 ] && [ $GREP_RC -eq 0 ]; then
-  echo "     - PASS - a rolled-back decryption key is refused, not adopted"
+  echo "     - ${GREEN}PASS${NC} - a rolled-back decryption key is refused, not adopted"
 else
-  echo "     ! FAIL - a rolled-back decryption key was accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - a rolled-back decryption key was accepted (exit $RC)"
   cat commit_derr3.log
   exit 1
 fi
@@ -852,9 +859,9 @@ if [ -w /dev/full ]; then
   PEND=$(ls .keychain/ 2>/dev/null | grep -c "decfull_dec_pending_seq")
 
   if [ $RC -ne 0 ] && [ "$PEND" = "1" ]; then
-    echo "     - PASS - failed plaintext delivery reports failure and keeps the verified copy"
+    echo "     - ${GREEN}PASS${NC} - failed plaintext delivery reports failure and keeps the verified copy"
   else
-    echo "     ! FAIL - failed plaintext delivery lost the message (exit $RC, $PEND pending)"
+    echo "     ! ${RED}FAIL${NC} - failed plaintext delivery lost the message (exit $RC, $PEND pending)"
     exit 1
   fi
 
@@ -864,9 +871,9 @@ if [ -w /dev/full ]; then
   CMP_RC=$?
 
   if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
-    echo "     - PASS - the plaintext is recovered byte-exact on the next run"
+    echo "     - ${GREEN}PASS${NC} - the plaintext is recovered byte-exact on the next run"
   else
-    echo "     ! FAIL - plaintext not recovered after failed delivery (exit $RC)"
+    echo "     ! ${RED}FAIL${NC} - plaintext not recovered after failed delivery (exit $RC)"
     exit 1
   fi
 
@@ -910,9 +917,9 @@ G2=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "unknownstate_enc_pending")
 
 if [ $G1 -eq 0 ] && [ $G2 -eq 0 ] && [ "$LEFT" = "0" ]; then
-  echo "     - PASS - an unrecognised pending artifact is reported and discarded"
+  echo "     - ${GREEN}PASS${NC} - an unrecognised pending artifact is reported and discarded"
 else
-  echo "     ! FAIL - unrecognised state not handled (warnings $G1/$G2, $LEFT left)"
+  echo "     ! ${RED}FAIL${NC} - unrecognised state not handled (warnings $G1/$G2, $LEFT left)"
   cat commit_uerr.log
   exit 1
 fi
@@ -926,9 +933,9 @@ EXPECT_OFF=$((OFF_BEFORE + MSGLEN))
 OFF_AFTER=$(grep '^EncryptionKeyOffset=' .keychain/unknownstate.meta | cut -d= -f2)
 
 if [ $RC -eq 0 ] && [ $CMP_RC -eq 0 ] && [ "$OFF_AFTER" = "$EXPECT_OFF" ]; then
-  echo "     - PASS - the run continues normally, consuming key exactly once"
+  echo "     - ${GREEN}PASS${NC} - the run continues normally, consuming key exactly once"
 else
-  echo "     ! FAIL - run did not continue correctly (exit $RC, offset $OFF_AFTER vs $EXPECT_OFF)"
+  echo "     ! ${RED}FAIL${NC} - run did not continue correctly (exit $RC, offset $OFF_AFTER vs $EXPECT_OFF)"
   exit 1
 fi
 
@@ -962,9 +969,9 @@ G1=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "extrapending_enc_pending")
 
 if [ $G1 -eq 0 ] && [ "$LEFT" = "0" ]; then
-  echo "     - PASS - extra pending artifacts are reported and removed"
+  echo "     - ${GREEN}PASS${NC} - extra pending artifacts are reported and removed"
 else
-  echo "     ! FAIL - duplicate pending artifacts mishandled (warning $G1, $LEFT left)"
+  echo "     ! ${RED}FAIL${NC} - duplicate pending artifacts mishandled (warning $G1, $LEFT left)"
   cat commit_xerr.log
   exit 1
 fi
@@ -973,9 +980,9 @@ expected_cipher commit_xkey.txt commit_xmsg.txt 0 commit_xexp.bin
 cmp -s commit_xout.bin commit_xexp.bin
 CMP_RC=$?
 if [ $RC -eq 0 ] && [ $CMP_RC -eq 0 ]; then
-  echo "     - PASS - the run proceeds from the key's true start afterwards"
+  echo "     - ${GREEN}PASS${NC} - the run proceeds from the key's true start afterwards"
 else
-  echo "     ! FAIL - run after duplicate artifacts was wrong (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - run after duplicate artifacts was wrong (exit $RC)"
   exit 1
 fi
 
@@ -1009,18 +1016,18 @@ G1=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nokeyfile_enc_pending")
 
 if [ $RC -ne 0 ] && [ $G1 -eq 0 ] && [ "$LEFT" = "1" ]; then
-  echo "     - PASS - the artifact is kept and the run aborts"
+  echo "     - ${GREEN}PASS${NC} - the artifact is kept and the run aborts"
 else
-  echo "     ! FAIL - missing key file during reconcile mishandled (exit $RC, warn $G1, $LEFT left)"
+  echo "     ! ${RED}FAIL${NC} - missing key file during reconcile mishandled (exit $RC, warn $G1, $LEFT left)"
   cat commit_nerr.log
   exit 1
 fi
 
 OFF=$(grep '^EncryptionKeyOffset=' .keychain/nokeyfile.meta | cut -d= -f2)
 if [ "$OFF" = "0" ]; then
-  echo "     - PASS - no key material was recorded as consumed"
+  echo "     - ${GREEN}PASS${NC} - no key material was recorded as consumed"
 else
-  echo "     ! FAIL - offset moved to $OFF despite an aborted run"
+  echo "     ! ${RED}FAIL${NC} - offset moved to $OFF despite an aborted run"
   exit 1
 fi
 
@@ -1032,9 +1039,9 @@ printf 'attempt' | ./bin/otp -c nokeyfile --encrypt > /dev/null 2>commit_nerr2.l
 RC=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nokeyfile_enc_pending")
 if [ $RC -eq 0 ] && [ "$LEFT" = "0" ]; then
-  echo "     - PASS - the kept artifact reconciles once the key file is readable again"
+  echo "     - ${GREEN}PASS${NC} - the kept artifact reconciles once the key file is readable again"
 else
-  echo "     ! FAIL - kept artifact not reconciled after the failure cleared (exit $RC, $LEFT left)"
+  echo "     ! ${RED}FAIL${NC} - kept artifact not reconciled after the failure cleared (exit $RC, $LEFT left)"
   cat commit_nerr2.log
   exit 1
 fi
@@ -1066,9 +1073,9 @@ expected_cipher commit_ndkey.txt.dec commit_ndplain.txt 0 commit_ndcipher.bin
 
 OTP_TEST_CRASH_POINT=after_key_publish ./bin/otp -c nodeckey --decrypt < commit_ndcipher.bin > /dev/null 2>/dev/null
 if [ $? -eq 77 ]; then
-  echo "     - PASS - simulated crash landed after the key bytes were spent"
+  echo "     - ${GREEN}PASS${NC} - simulated crash landed after the key bytes were spent"
 else
-  echo "     ! FAIL - simulated crash did not trigger as expected"
+  echo "     ! ${RED}FAIL${NC} - simulated crash did not trigger as expected"
   exit 1
 fi
 
@@ -1083,18 +1090,18 @@ G1=$?
 PENDING=$(ls .keychain/nodeckey_dec_pending_seq* 2>/dev/null | head -n 1)
 
 if [ $RC -ne 0 ] && [ $G1 -eq 0 ] && [ -n "$PENDING" ]; then
-  echo "     - PASS - the run aborts and the plaintext artifact survives"
+  echo "     - ${GREEN}PASS${NC} - the run aborts and the plaintext artifact survives"
 else
-  echo "     ! FAIL - recovery with an unreadable key file mishandled (exit $RC, warn $G1, pending '$PENDING')"
+  echo "     ! ${RED}FAIL${NC} - recovery with an unreadable key file mishandled (exit $RC, warn $G1, pending '$PENDING')"
   cat commit_nderr.log
   exit 1
 fi
 
 cmp -s "$PENDING" commit_ndplain.txt
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the kept artifact is byte-for-byte the missing plaintext"
+  echo "     - ${GREEN}PASS${NC} - the kept artifact is byte-for-byte the missing plaintext"
 else
-  echo "     ! FAIL - the kept artifact does not hold the plaintext"
+  echo "     ! ${RED}FAIL${NC} - the kept artifact does not hold the plaintext"
   exit 1
 fi
 
@@ -1110,9 +1117,9 @@ C2=$?
 LEFT=$(ls .keychain/ 2>/dev/null | grep -c "nodeckey_dec_pending")
 
 if [ $G2 -eq 0 ] && [ $C2 -eq 0 ] && [ "$LEFT" = "0" ]; then
-  echo "     - PASS - once the key file is back the message is redelivered intact"
+  echo "     - ${GREEN}PASS${NC} - once the key file is back the message is redelivered intact"
 else
-  echo "     ! FAIL - redelivery after the failure cleared went wrong (recover $G2, cmp $C2, $LEFT left)"
+  echo "     ! ${RED}FAIL${NC} - redelivery after the failure cleared went wrong (recover $G2, cmp $C2, $LEFT left)"
   cat commit_nderr2.log
   exit 1
 fi
@@ -1150,9 +1157,9 @@ if [ "$(id -u)" != "0" ]; then
   grep -q "cannot create lock file" commit_ioerr1.log
   G=$?
   if [ $RC -ne 0 ] && [ $G -eq 0 ]; then
-    echo "     - PASS - a lock that cannot be created aborts the operation"
+    echo "     - ${GREEN}PASS${NC} - a lock that cannot be created aborts the operation"
   else
-    echo "     ! FAIL - unusable lock file not reported (exit $RC)"
+    echo "     ! ${RED}FAIL${NC} - unusable lock file not reported (exit $RC)"
     cat commit_ioerr1.log
     exit 1
   fi
@@ -1168,9 +1175,9 @@ if [ "$(id -u)" != "0" ]; then
   grep -q "cannot create staging file" commit_ioerr2.log
   G=$?
   if [ $RC -ne 0 ] && [ $G -eq 0 ] && [ "$OFF_AFTER" = "$OFF_BEFORE" ]; then
-    echo "     - PASS - a staging file that cannot be created aborts before any key is spent"
+    echo "     - ${GREEN}PASS${NC} - a staging file that cannot be created aborts before any key is spent"
   else
-    echo "     ! FAIL - unusable staging file mishandled (exit $RC, offset $OFF_BEFORE->$OFF_AFTER)"
+    echo "     ! ${RED}FAIL${NC} - unusable staging file mishandled (exit $RC, offset $OFF_BEFORE->$OFF_AFTER)"
     cat commit_ioerr2.log
     exit 1
   fi
@@ -1192,9 +1199,9 @@ if [ "$(id -u)" != "0" ]; then
   G=$?
 
   if [ $RC -ne 0 ] && [ $G -eq 0 ] && [ "$KEY_AFTER" = "$EXPECT" ]; then
-    echo "     - PASS - a failed .meta write is caught, leaving a recoverable state"
+    echo "     - ${GREEN}PASS${NC} - a failed .meta write is caught, leaving a recoverable state"
   else
-    echo "     ! FAIL - failed .meta write mishandled (exit $RC, key $KEY_BEFORE->$KEY_AFTER)"
+    echo "     ! ${RED}FAIL${NC} - failed .meta write mishandled (exit $RC, key $KEY_BEFORE->$KEY_AFTER)"
     cat commit_ioerr3.log
     exit 1
   fi
@@ -1206,9 +1213,9 @@ if [ "$(id -u)" != "0" ]; then
   cmp -s commit_ioout.bin commit_ioexp.bin
   CMP_RC=$?
   if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
-    echo "     - PASS - the interrupted commit recovers and redelivers byte-exact"
+    echo "     - ${GREEN}PASS${NC} - the interrupted commit recovers and redelivers byte-exact"
   else
-    echo "     ! FAIL - recovery after a failed .meta write was wrong (exit $RC)"
+    echo "     ! ${RED}FAIL${NC} - recovery after a failed .meta write was wrong (exit $RC)"
     exit 1
   fi
 

@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # Delivery-confirmation gate tests.
 #
 # The ciphertext otp emits carries no key-range tag, so within one
@@ -50,9 +57,9 @@ echo "     Testing first message needs no confirmation..."
 printf 'first message' > confirm_plain1.txt
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm1 --encrypt < confirm_plain1.txt > confirm_c1.bin 2>confirm_err.log
 if [ $? -eq 0 ] && [ "$(wc -c < confirm_c1.bin | tr -d ' ')" = "13" ]; then
-  echo "     - PASS - first message encrypted without prompting"
+  echo "     - ${GREEN}PASS${NC} - first message encrypted without prompting"
 else
-  echo "     ! FAIL - first message should not require confirmation"
+  echo "     ! ${RED}FAIL${NC} - first message should not require confirmation"
   cat confirm_err.log
   exit 1
 fi
@@ -68,9 +75,9 @@ printf 'second here!' > confirm_plain2.txt
 OTP_TEST_CONFIRM_ANSWER=y ./bin/otp -c confirm1 --encrypt < confirm_plain2.txt > confirm_c2.bin 2>confirm_err.log
 STATUS=$?
 if [ $STATUS -eq 0 ] && [ "$(wc -c < confirm_c2.bin | tr -d ' ')" = "12" ]; then
-  echo "     - PASS - second message encrypted after confirmation"
+  echo "     - ${GREEN}PASS${NC} - second message encrypted after confirmation"
 else
-  echo "     ! FAIL - confirmed encrypt failed (exit $STATUS)"
+  echo "     ! ${RED}FAIL${NC} - confirmed encrypt failed (exit $STATUS)"
   cat confirm_err.log
   exit 1
 fi
@@ -79,9 +86,9 @@ if grep -q "Confirmation required" confirm_err.log &&
    grep -q "message: #1" confirm_err.log &&
    grep -q "key consumed up to offset 13" confirm_err.log &&
    grep -q "key bytes 13-25" confirm_err.log; then
-  echo "     - PASS - prompt names the previous sequence and the key offsets"
+  echo "     - ${GREEN}PASS${NC} - prompt names the previous sequence and the key offsets"
 else
-  echo "     ! FAIL - prompt is missing sequence/offset details"
+  echo "     ! ${RED}FAIL${NC} - prompt is missing sequence/offset details"
   cat confirm_err.log
   exit 1
 fi
@@ -100,26 +107,26 @@ printf 'never sent' > confirm_plain3.txt
 OTP_TEST_CONFIRM_ANSWER=n ./bin/otp -c confirm1 --encrypt < confirm_plain3.txt > confirm_c3.bin 2>confirm_err.log
 STATUS=$?
 if [ $STATUS -ne 0 ] && [ ! -s confirm_c3.bin ]; then
-  echo "     - PASS - cancelled run exited non-zero with no output"
+  echo "     - ${GREEN}PASS${NC} - cancelled run exited non-zero with no output"
 else
-  echo "     ! FAIL - cancelled run must fail and emit nothing (exit $STATUS)"
+  echo "     ! ${RED}FAIL${NC} - cancelled run must fail and emit nothing (exit $STATUS)"
   cat confirm_err.log
   exit 1
 fi
 
 if cmp -s .keychain/confirm1_enc.key confirm_key_before.snap &&
    cmp -s .keychain/confirm1.meta confirm_meta_before.snap; then
-  echo "     - PASS - key file and metadata are byte-identical after cancel"
+  echo "     - ${GREEN}PASS${NC} - key file and metadata are byte-identical after cancel"
 else
-  echo "     ! FAIL - cancel must not touch key material or metadata"
+  echo "     ! ${RED}FAIL${NC} - cancel must not touch key material or metadata"
   exit 1
 fi
 
 LEFTOVER=$(ls .keychain/confirm1_enc_pending* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$LEFTOVER" = "0" ]; then
-  echo "     - PASS - no pending artifact or staging file left behind"
+  echo "     - ${GREEN}PASS${NC} - no pending artifact or staging file left behind"
 else
-  echo "     ! FAIL - cancel left staged files in .keychain/"
+  echo "     ! ${RED}FAIL${NC} - cancel left staged files in .keychain/"
   ls .keychain/
   exit 1
 fi
@@ -136,9 +143,9 @@ STATUS=$?
 if [ $STATUS -ne 0 ] && [ ! -s confirm_c3.bin ] &&
    grep -q "assume-delivered" confirm_err.log &&
    cmp -s .keychain/confirm1_enc.key confirm_key_before.snap; then
-  echo "     - PASS - refused without a terminal, keys intact, remedy named"
+  echo "     - ${GREEN}PASS${NC} - refused without a terminal, keys intact, remedy named"
 else
-  echo "     ! FAIL - must fail closed without a terminal (exit $STATUS)"
+  echo "     ! ${RED}FAIL${NC} - must fail closed without a terminal (exit $STATUS)"
   cat confirm_err.log
   exit 1
 fi
@@ -152,9 +159,9 @@ echo "     Testing -y, --assume-delivered and OTP_ASSUME_DELIVERED bypasses..."
 
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm1 --encrypt -y < confirm_plain3.txt > confirm_c3.bin 2>confirm_err.log
 if [ $? -eq 0 ] && [ -s confirm_c3.bin ] && ! grep -q "Confirmation required" confirm_err.log; then
-  echo "     - PASS - -y proceeds without prompting"
+  echo "     - ${GREEN}PASS${NC} - -y proceeds without prompting"
 else
-  echo "     ! FAIL - -y must skip the prompt"
+  echo "     ! ${RED}FAIL${NC} - -y must skip the prompt"
   cat confirm_err.log
   exit 1
 fi
@@ -162,9 +169,9 @@ fi
 printf 'and another' > confirm_plain4.txt
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm1 --encrypt --assume-delivered < confirm_plain4.txt > confirm_c4.bin 2>confirm_err.log
 if [ $? -eq 0 ] && [ -s confirm_c4.bin ] && ! grep -q "Confirmation required" confirm_err.log; then
-  echo "     - PASS - --assume-delivered proceeds without prompting"
+  echo "     - ${GREEN}PASS${NC} - --assume-delivered proceeds without prompting"
 else
-  echo "     ! FAIL - --assume-delivered must skip the prompt"
+  echo "     ! ${RED}FAIL${NC} - --assume-delivered must skip the prompt"
   cat confirm_err.log
   exit 1
 fi
@@ -172,9 +179,9 @@ fi
 printf 'one more' > confirm_plain5.txt
 OTP_TEST_NO_TTY=1 OTP_ASSUME_DELIVERED=1 ./bin/otp -c confirm1 --encrypt < confirm_plain5.txt > confirm_c5.bin 2>confirm_err.log
 if [ $? -eq 0 ] && [ -s confirm_c5.bin ] && ! grep -q "Confirmation required" confirm_err.log; then
-  echo "     - PASS - OTP_ASSUME_DELIVERED=1 proceeds without prompting"
+  echo "     - ${GREEN}PASS${NC} - OTP_ASSUME_DELIVERED=1 proceeds without prompting"
 else
-  echo "     ! FAIL - OTP_ASSUME_DELIVERED=1 must skip the prompt"
+  echo "     ! ${RED}FAIL${NC} - OTP_ASSUME_DELIVERED=1 must skip the prompt"
   cat confirm_err.log
   exit 1
 fi
@@ -199,9 +206,9 @@ confirm_cipher confirm_key2.txt.dec confirm_din2.txt 12 confirm_dc2.bin
 # first incoming message: no prompt needed
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm2 --decrypt < confirm_dc1.bin > confirm_dout1.txt 2>confirm_err.log
 if [ $? -eq 0 ] && cmp -s confirm_dout1.txt confirm_din1.txt; then
-  echo "     - PASS - first incoming message decrypted without prompting"
+  echo "     - ${GREEN}PASS${NC} - first incoming message decrypted without prompting"
 else
-  echo "     ! FAIL - first decrypt failed"
+  echo "     ! ${RED}FAIL${NC} - first decrypt failed"
   cat confirm_err.log
   exit 1
 fi
@@ -211,9 +218,9 @@ cp .keychain/confirm2_dec.key confirm_deckey.snap
 OTP_TEST_CONFIRM_ANSWER=n ./bin/otp -c confirm2 --decrypt < confirm_dc2.bin > confirm_dout2.txt 2>confirm_err.log
 if [ $? -ne 0 ] && [ ! -s confirm_dout2.txt ] &&
    cmp -s .keychain/confirm2_dec.key confirm_deckey.snap; then
-  echo "     - PASS - decrypt cancelled on 'n', decryption key intact"
+  echo "     - ${GREEN}PASS${NC} - decrypt cancelled on 'n', decryption key intact"
 else
-  echo "     ! FAIL - decrypt cancel must consume no key and emit nothing"
+  echo "     ! ${RED}FAIL${NC} - decrypt cancel must consume no key and emit nothing"
   cat confirm_err.log
   exit 1
 fi
@@ -222,9 +229,9 @@ fi
 # ("yes" spelled out, to cover that accepted answer too)
 OTP_TEST_CONFIRM_ANSWER=yes ./bin/otp -c confirm2 --decrypt < confirm_dc2.bin > confirm_dout2.txt 2>confirm_err.log
 if [ $? -eq 0 ] && cmp -s confirm_dout2.txt confirm_din2.txt; then
-  echo "     - PASS - same ciphertext decrypts correctly after confirmed retry"
+  echo "     - ${GREEN}PASS${NC} - same ciphertext decrypts correctly after confirmed retry"
 else
-  echo "     ! FAIL - cancelled decrypt must remain retryable"
+  echo "     ! ${RED}FAIL${NC} - cancelled decrypt must remain retryable"
   cat confirm_err.log
   exit 1
 fi
@@ -253,9 +260,9 @@ printf 'new input, must be ignored' | OTP_TEST_NO_TTY=1 \
 STATUS=$?
 if [ $STATUS -eq 3 ] && cmp -s confirm_redelivered.bin confirm_expected6.bin &&
    ! grep -q "Confirmation required" confirm_err.log; then
-  echo "     - PASS - redelivery ran unprompted with no terminal and exited 3"
+  echo "     - ${GREEN}PASS${NC} - redelivery ran unprompted with no terminal and exited 3"
 else
-  echo "     ! FAIL - redelivery must not be gated (exit $STATUS)"
+  echo "     ! ${RED}FAIL${NC} - redelivery must not be gated (exit $STATUS)"
   cat confirm_err.log
   exit 1
 fi

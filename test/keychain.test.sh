@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # These tests exercise machinery other than the delivery-confirmation gate
 # (see test/confirm.test.sh for that), so state the confirmation explicitly:
 # without it, every message after a direction's first would prompt on the
@@ -23,16 +30,16 @@ echo "     Testing add contact..."
 
 ./bin/otp --add-contact alice > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - add contact succeeded"
+  echo "     - ${GREEN}PASS${NC} - add contact succeeded"
 else
-  echo "     ! FAIL - add contact failed"
+  echo "     ! ${RED}FAIL${NC} - add contact failed"
   exit -1
 fi
 
 if test -f ".keychain/alice.meta"; then
-  echo "     - PASS - per-contact metadata file .keychain/alice.meta was created"
+  echo "     - ${GREEN}PASS${NC} - per-contact metadata file .keychain/alice.meta was created"
 else
-  echo "     ! FAIL - .keychain/alice.meta was NOT created"
+  echo "     ! ${RED}FAIL${NC} - .keychain/alice.meta was NOT created"
   exit -1
 fi
 
@@ -44,17 +51,17 @@ echo "     Testing has contact..."
 
 ./bin/otp --has-contact alice > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - has contact found alice"
+  echo "     - ${GREEN}PASS${NC} - has contact found alice"
 else
-  echo "     ! FAIL - has contact did not find alice"
+  echo "     ! ${RED}FAIL${NC} - has contact did not find alice"
   exit -1
 fi
 
 ./bin/otp --has-contact bob > /dev/null
 if [ $? -ne 0 ]; then
-  echo "     - PASS - has contact correctly reports bob doesn't exist"
+  echo "     - ${GREEN}PASS${NC} - has contact correctly reports bob doesn't exist"
 else
-  echo "     ! FAIL - has contact incorrectly found bob"
+  echo "     ! ${RED}FAIL${NC} - has contact incorrectly found bob"
   exit -1
 fi
 
@@ -67,9 +74,9 @@ echo "     Testing list contacts..."
 OUTPUT=$(./bin/otp --list-contacts)
 echo "$OUTPUT" | grep -q "alice"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - list contacts shows alice"
+  echo "     - ${GREEN}PASS${NC} - list contacts shows alice"
 else
-  echo "     ! FAIL - list contacts does not show alice"
+  echo "     ! ${RED}FAIL${NC} - list contacts does not show alice"
   exit -1
 fi
 
@@ -91,9 +98,9 @@ echo "$OUTPUT" | grep -q "charlie"
 CHARLIE_FOUND=$?
 
 if [ $ALICE_FOUND -eq 0 ] && [ $BOB_FOUND -eq 0 ] && [ $CHARLIE_FOUND -eq 0 ]; then
-  echo "     - PASS - list contacts shows all three contacts"
+  echo "     - ${GREEN}PASS${NC} - list contacts shows all three contacts"
 else
-  echo "     ! FAIL - list contacts missing some contacts"
+  echo "     ! ${RED}FAIL${NC} - list contacts missing some contacts"
   exit -1
 fi
 
@@ -106,18 +113,18 @@ echo "     Testing show contact..."
 OUTPUT=$(./bin/otp --show-contact alice)
 echo "$OUTPUT" | grep -q "Contact: alice"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - show contact displays alice"
+  echo "     - ${GREEN}PASS${NC} - show contact displays alice"
 else
-  echo "     ! FAIL - show contact does not display alice correctly"
+  echo "     ! ${RED}FAIL${NC} - show contact does not display alice correctly"
   exit -1
 fi
 
 # Check that keys are masked
 echo "$OUTPUT" | grep -q "\*\*\*\*\*\*\*"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - show contact masks keys"
+  echo "     - ${GREEN}PASS${NC} - show contact masks keys"
 else
-  echo "     ! FAIL - show contact does not mask keys"
+  echo "     ! ${RED}FAIL${NC} - show contact does not mask keys"
   exit -1
 fi
 
@@ -129,17 +136,17 @@ echo "     Testing remove contact..."
 
 ./bin/otp --remove-contact bob > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - remove contact succeeded"
+  echo "     - ${GREEN}PASS${NC} - remove contact succeeded"
 else
-  echo "     ! FAIL - remove contact failed"
+  echo "     ! ${RED}FAIL${NC} - remove contact failed"
   exit -1
 fi
 
 ./bin/otp --has-contact bob > /dev/null
 if [ $? -ne 0 ]; then
-  echo "     - PASS - bob was successfully removed"
+  echo "     - ${GREEN}PASS${NC} - bob was successfully removed"
 else
-  echo "     ! FAIL - bob still exists after removal"
+  echo "     ! ${RED}FAIL${NC} - bob still exists after removal"
   exit -1
 fi
 
@@ -150,9 +157,9 @@ ALICE_EXISTS=$?
 CHARLIE_EXISTS=$?
 
 if [ $ALICE_EXISTS -eq 0 ] && [ $CHARLIE_EXISTS -eq 0 ]; then
-  echo "     - PASS - other contacts remain after removal"
+  echo "     - ${GREEN}PASS${NC} - other contacts remain after removal"
 else
-  echo "     ! FAIL - other contacts were incorrectly affected"
+  echo "     ! ${RED}FAIL${NC} - other contacts were incorrectly affected"
   exit -1
 fi
 
@@ -164,9 +171,9 @@ echo "     Testing duplicate contact prevention..."
 
 ./bin/otp --add-contact alice > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-  echo "     - PASS - duplicate contact correctly rejected"
+  echo "     - ${GREEN}PASS${NC} - duplicate contact correctly rejected"
 else
-  echo "     ! FAIL - duplicate contact was allowed"
+  echo "     ! ${RED}FAIL${NC} - duplicate contact was allowed"
   exit -1
 fi
 
@@ -179,35 +186,35 @@ echo "     Testing short options..."
 ./bin/otp -ac dave > /dev/null
 ./bin/otp -hc dave > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - short option -ac and -hc work"
+  echo "     - ${GREEN}PASS${NC} - short option -ac and -hc work"
 else
-  echo "     ! FAIL - short options don't work"
+  echo "     ! ${RED}FAIL${NC} - short options don't work"
   exit -1
 fi
 
 OUTPUT=$(./bin/otp -lc)
 echo "$OUTPUT" | grep -q "dave"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - short option -lc works"
+  echo "     - ${GREEN}PASS${NC} - short option -lc works"
 else
-  echo "     ! FAIL - short option -lc doesn't work"
+  echo "     ! ${RED}FAIL${NC} - short option -lc doesn't work"
   exit -1
 fi
 
 OUTPUT=$(./bin/otp -sc dave)
 echo "$OUTPUT" | grep -q "Contact: dave"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - short option -sc works"
+  echo "     - ${GREEN}PASS${NC} - short option -sc works"
 else
-  echo "     ! FAIL - short option -sc doesn't work"
+  echo "     ! ${RED}FAIL${NC} - short option -sc doesn't work"
   exit -1
 fi
 
 ./bin/otp -rc dave > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - short option -rc works"
+  echo "     - ${GREEN}PASS${NC} - short option -rc works"
 else
-  echo "     ! FAIL - short option -rc doesn't work"
+  echo "     ! ${RED}FAIL${NC} - short option -rc doesn't work"
   exit -1
 fi
 
@@ -225,9 +232,9 @@ grep -q "Name=charlie" .keychain/charlie.meta
 CHARLIE_IN_FILE=$?
 
 if [ $ALICE_IN_FILE -eq 0 ] && [ $CHARLIE_IN_FILE -eq 0 ]; then
-  echo "     - PASS - contacts persisted to their own metadata files"
+  echo "     - ${GREEN}PASS${NC} - contacts persisted to their own metadata files"
 else
-  echo "     ! FAIL - contacts not properly persisted"
+  echo "     ! ${RED}FAIL${NC} - contacts not properly persisted"
   exit -1
 fi
 
@@ -244,25 +251,25 @@ rm tmpkey
 
 # Verify key files were created
 if [ ! -f "encryption_testalice.txt" ] || [ ! -f "decryption_testalice.txt" ]; then
-  echo "     ! FAIL - key pair generation failed"
+  echo "     ! ${RED}FAIL${NC} - key pair generation failed"
   exit -1
 fi
 
 # Add contact with keys
 ./bin/otp --add-contact testcontact encryption_testalice.txt decryption_testalice.txt > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - add contact with keys succeeded"
+  echo "     - ${GREEN}PASS${NC} - add contact with keys succeeded"
 else
-  echo "     ! FAIL - add contact with keys failed"
+  echo "     ! ${RED}FAIL${NC} - add contact with keys failed"
   exit -1
 fi
 
 # Verify contact was added
 ./bin/otp --has-contact testcontact > /dev/null
 if [ $? -eq 0 ]; then
-  echo "     - PASS - contact with keys exists"
+  echo "     - ${GREEN}PASS${NC} - contact with keys exists"
 else
-  echo "     ! FAIL - contact with keys was not added"
+  echo "     ! ${RED}FAIL${NC} - contact with keys was not added"
   exit -1
 fi
 
@@ -274,26 +281,26 @@ echo "$OUTPUT" | grep -q "DecryptionKey: \*\*\*\*\*\*\* ([1-9][0-9]* bytes)"
 DEC_KEY_LOADED=$?
 
 if [ $ENC_KEY_LOADED -eq 0 ] && [ $DEC_KEY_LOADED -eq 0 ]; then
-  echo "     - PASS - keys were loaded correctly"
+  echo "     - ${GREEN}PASS${NC} - keys were loaded correctly"
 else
-  echo "     ! FAIL - keys were not loaded properly"
+  echo "     ! ${RED}FAIL${NC} - keys were not loaded properly"
   exit -1
 fi
 
 # Test that key size is correct (1MB = 1048576 bytes)
 echo "$OUTPUT" | grep -q "EncryptionKey: \*\*\*\*\*\*\* (1048576 bytes)"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - encryption key size is correct"
+  echo "     - ${GREEN}PASS${NC} - encryption key size is correct"
 else
-  echo "     ! FAIL - encryption key size is incorrect"
+  echo "     ! ${RED}FAIL${NC} - encryption key size is incorrect"
   exit -1
 fi
 
 echo "$OUTPUT" | grep -q "DecryptionKey: \*\*\*\*\*\*\* (1048576 bytes)"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - decryption key size is correct"
+  echo "     - ${GREEN}PASS${NC} - decryption key size is correct"
 else
-  echo "     ! FAIL - decryption key size is incorrect"
+  echo "     ! ${RED}FAIL${NC} - decryption key size is incorrect"
   exit -1
 fi
 
@@ -317,17 +324,17 @@ echo -n "$PLAIN_MSG" > test_plain.txt
 ./bin/otp -c enctest --encrypt < test_plain.txt > test_cipher.bin 2>/dev/null
 
 if [ $? -eq 0 ]; then
-  echo "     - PASS - encryption with contact succeeded"
+  echo "     - ${GREEN}PASS${NC} - encryption with contact succeeded"
 else
-  echo "     ! FAIL - encryption with contact failed"
+  echo "     ! ${RED}FAIL${NC} - encryption with contact failed"
   exit -1
 fi
 
 # Verify cipher text is not the same as plain text (compare file sizes or content)
 if ! diff -q test_plain.txt test_cipher.bin > /dev/null 2>&1; then
-  echo "     - PASS - cipher text differs from plain text"
+  echo "     - ${GREEN}PASS${NC} - cipher text differs from plain text"
 else
-  echo "     ! FAIL - cipher text same as plain text"
+  echo "     ! ${RED}FAIL${NC} - cipher text same as plain text"
   exit -1
 fi
 
@@ -335,27 +342,27 @@ fi
 OUTPUT=$(./bin/otp --show-contact enctest)
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 13"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - encryption key offset updated correctly"
+  echo "     - ${GREEN}PASS${NC} - encryption key offset updated correctly"
 else
-  echo "     ! FAIL - encryption key offset not updated correctly"
+  echo "     ! ${RED}FAIL${NC} - encryption key offset not updated correctly"
   exit -1
 fi
 
 # Verify sequence was incremented
 echo "$OUTPUT" | grep -q "EncryptedSequence: 1"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - sequence incremented correctly"
+  echo "     - ${GREEN}PASS${NC} - sequence incremented correctly"
 else
-  echo "     ! FAIL - sequence not incremented"
+  echo "     ! ${RED}FAIL${NC} - sequence not incremented"
   exit -1
 fi
 
 # Verify LastMessageSentAt was set
 echo "$OUTPUT" | grep -q -v "LastMessageSentAt: never"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - LastMessageSentAt timestamp set"
+  echo "     - ${GREEN}PASS${NC} - LastMessageSentAt timestamp set"
 else
-  echo "     ! FAIL - LastMessageSentAt not set"
+  echo "     ! ${RED}FAIL${NC} - LastMessageSentAt not set"
   exit -1
 fi
 
@@ -363,9 +370,9 @@ fi
 EXPECTED_REMAINING=$((1048576 - 13))
 echo "$OUTPUT" | grep -q "EncryptionKey: \*\*\*\*\*\*\* ($EXPECTED_REMAINING bytes)"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - remaining encryption key size correct"
+  echo "     - ${GREEN}PASS${NC} - remaining encryption key size correct"
 else
-  echo "     ! FAIL - remaining encryption key size incorrect"
+  echo "     ! ${RED}FAIL${NC} - remaining encryption key size incorrect"
   exit -1
 fi
 
@@ -382,17 +389,17 @@ echo "     Testing decryption with contact..."
 ./bin/otp -c dectest --decrypt < test_cipher.bin > test_decrypted.txt 2>/dev/null
 
 if [ $? -eq 0 ]; then
-  echo "     - PASS - decryption with contact succeeded"
+  echo "     - ${GREEN}PASS${NC} - decryption with contact succeeded"
 else
-  echo "     ! FAIL - decryption with contact failed"
+  echo "     ! ${RED}FAIL${NC} - decryption with contact failed"
   exit -1
 fi
 
 # Verify decrypted text matches original
 if diff -q test_plain.txt test_decrypted.txt > /dev/null 2>&1; then
-  echo "     - PASS - decrypted text matches original plain text"
+  echo "     - ${GREEN}PASS${NC} - decrypted text matches original plain text"
 else
-  echo "     ! FAIL - decrypted text does not match"
+  echo "     ! ${RED}FAIL${NC} - decrypted text does not match"
   cat test_plain.txt
   echo "---"
   cat test_decrypted.txt
@@ -403,18 +410,18 @@ fi
 OUTPUT=$(./bin/otp --show-contact dectest)
 echo "$OUTPUT" | grep -q "DecryptionKeyOffset: 13"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - decryption key offset updated correctly"
+  echo "     - ${GREEN}PASS${NC} - decryption key offset updated correctly"
 else
-  echo "     ! FAIL - decryption key offset not updated correctly"
+  echo "     ! ${RED}FAIL${NC} - decryption key offset not updated correctly"
   exit -1
 fi
 
 # Verify LastMessageReceivedAt was set
 echo "$OUTPUT" | grep -q -v "LastMessageReceivedAt: never"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - LastMessageReceivedAt timestamp set"
+  echo "     - ${GREEN}PASS${NC} - LastMessageReceivedAt timestamp set"
 else
-  echo "     ! FAIL - LastMessageReceivedAt not set"
+  echo "     ! ${RED}FAIL${NC} - LastMessageReceivedAt not set"
   exit -1
 fi
 
@@ -426,9 +433,9 @@ echo "     Testing error cases..."
 
 echo -n "test" | ./bin/otp -c nonexistent --encrypt > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-  echo "     - PASS - error on nonexistent contact"
+  echo "     - ${GREEN}PASS${NC} - error on nonexistent contact"
 else
-  echo "     ! FAIL - should error on nonexistent contact"
+  echo "     ! ${RED}FAIL${NC} - should error on nonexistent contact"
   exit -1
 fi
 
@@ -439,9 +446,9 @@ fi
 ./bin/otp --add-contact emptykey > /dev/null 2>&1
 echo -n "test" | ./bin/otp -c emptykey --encrypt > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-  echo "     - PASS - error on empty encryption key"
+  echo "     - ${GREEN}PASS${NC} - error on empty encryption key"
 else
-  echo "     ! FAIL - should error on empty encryption key"
+  echo "     ! ${RED}FAIL${NC} - should error on empty encryption key"
   exit -1
 fi
 
@@ -457,9 +464,9 @@ dd if=/dev/urandom of=smallkey.txt.dec bs=1 count=$(wc -c < smallkey.txt) 2>/dev
 # Try to encrypt a message larger than the key
 echo -n "This message is longer than 5 bytes" | ./bin/otp -c smallkeytest --encrypt > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-  echo "     - PASS - error when message exceeds key size"
+  echo "     - ${GREEN}PASS${NC} - error when message exceeds key size"
 else
-  echo "     ! FAIL - should error when message exceeds key size"
+  echo "     ! ${RED}FAIL${NC} - should error when message exceeds key size"
   exit -1
 fi
 
@@ -467,9 +474,9 @@ fi
 OUTPUT=$(./bin/otp --show-contact smallkeytest)
 echo "$OUTPUT" | grep -q "EncryptedSequence: 0"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - keychain not modified on error"
+  echo "     - ${GREEN}PASS${NC} - keychain not modified on error"
 else
-  echo "     ! FAIL - keychain was modified on error"
+  echo "     ! ${RED}FAIL${NC} - keychain was modified on error"
   exit -1
 fi
 
@@ -500,9 +507,9 @@ dd if=/dev/urandom of=bigmsg.txt bs=1M count=10 2>/dev/null
 ./bin/otp -c multichunktest --encrypt < bigmsg.txt > multichunk_partial_output.bin 2>/dev/null
 RC=$?
 if [ $RC -ne 0 ]; then
-  echo "     - PASS - error when multi-chunk message exceeds key size"
+  echo "     - ${GREEN}PASS${NC} - error when multi-chunk message exceeds key size"
 else
-  echo "     ! FAIL - should error when multi-chunk message exceeds key size"
+  echo "     ! ${RED}FAIL${NC} - should error when multi-chunk message exceeds key size"
   exit -1
 fi
 
@@ -513,9 +520,9 @@ fi
 # considered unused.
 PARTIAL_SIZE=$(wc -c < multichunk_partial_output.bin | tr -d ' ')
 if [ "$PARTIAL_SIZE" = "0" ]; then
-  echo "     - PASS - no partial ciphertext leaked to output on failure"
+  echo "     - ${GREEN}PASS${NC} - no partial ciphertext leaked to output on failure"
 else
-  echo "     ! FAIL - $PARTIAL_SIZE bytes of ciphertext leaked to output despite failure (key reuse risk)"
+  echo "     ! ${RED}FAIL${NC} - $PARTIAL_SIZE bytes of ciphertext leaked to output despite failure (key reuse risk)"
   exit -1
 fi
 
@@ -523,17 +530,17 @@ fi
 OUTPUT=$(./bin/otp --show-contact multichunktest)
 echo "$OUTPUT" | grep -q "EncryptedSequence: 0"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - sequence not incremented after multi-chunk failure"
+  echo "     - ${GREEN}PASS${NC} - sequence not incremented after multi-chunk failure"
 else
-  echo "     ! FAIL - sequence incremented after multi-chunk failure (key was consumed)"
+  echo "     ! ${RED}FAIL${NC} - sequence incremented after multi-chunk failure (key was consumed)"
   exit -1
 fi
 
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 0"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - encryption key offset unchanged after multi-chunk failure"
+  echo "     - ${GREEN}PASS${NC} - encryption key offset unchanged after multi-chunk failure"
 else
-  echo "     ! FAIL - encryption key offset advanced after multi-chunk failure (key bytes leaked)"
+  echo "     ! ${RED}FAIL${NC} - encryption key offset advanced after multi-chunk failure (key bytes leaked)"
   exit -1
 fi
 
@@ -549,9 +556,9 @@ dd if=multichunk_key.txt of=multichunk_key_prefix.txt bs=1 count=100 2>/dev/null
 
 cmp -s multichunk_cipher.bin expected_cipher.bin
 if [ $? -eq 0 ]; then
-  echo "     - PASS - key material was not leaked or desynced by the failed multi-chunk attempt"
+  echo "     - ${GREEN}PASS${NC} - key material was not leaked or desynced by the failed multi-chunk attempt"
 else
-  echo "     ! FAIL - encrypted output does not match expected ciphertext (key was reused/desynced)"
+  echo "     ! ${RED}FAIL${NC} - encrypted output does not match expected ciphertext (key was reused/desynced)"
   exit -1
 fi
 
@@ -564,9 +571,9 @@ rm -f multichunk_cipher.bin expected_cipher.bin multichunk_key_prefix.txt.*.next
 
 echo -n "test" | ./bin/otp -c enctest > /dev/null 2>&1
 if [ $? -ne 0 ]; then
-  echo "     - PASS - error when missing --encrypt/--decrypt flag"
+  echo "     - ${GREEN}PASS${NC} - error when missing --encrypt/--decrypt flag"
 else
-  echo "     ! FAIL - should error when missing --encrypt/--decrypt flag"
+  echo "     ! ${RED}FAIL${NC} - should error when missing --encrypt/--decrypt flag"
   exit -1
 fi
 
@@ -584,9 +591,9 @@ echo -n "$PLAIN_MSG2" > test_plain2.txt
 OUTPUT=$(./bin/otp --show-contact enctest)
 echo "$OUTPUT" | grep -q "EncryptedSequence: 2"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - sequence incremented on second operation"
+  echo "     - ${GREEN}PASS${NC} - sequence incremented on second operation"
 else
-  echo "     ! FAIL - sequence not incremented correctly on second operation"
+  echo "     ! ${RED}FAIL${NC} - sequence not incremented correctly on second operation"
   exit -1
 fi
 
@@ -594,9 +601,9 @@ fi
 EXPECTED_OFFSET=$((13 + 14))
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: $EXPECTED_OFFSET"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - offset updated correctly after multiple operations"
+  echo "     - ${GREEN}PASS${NC} - offset updated correctly after multiple operations"
 else
-  echo "     ! FAIL - offset not updated correctly after multiple operations"
+  echo "     ! ${RED}FAIL${NC} - offset not updated correctly after multiple operations"
   exit -1
 fi
 
@@ -636,9 +643,9 @@ ALICE_MSG="Top secret message from Alice"
 BOB_DECRYPTED=$(cd bob_home && cat ../roundtrip_msg1.bin | "$OTP_BIN" -c alice --decrypt 2>/dev/null)
 
 if [ "$BOB_DECRYPTED" = "$ALICE_MSG" ]; then
-  echo "     - PASS - round-trip Alice->Bob successful"
+  echo "     - ${GREEN}PASS${NC} - round-trip Alice->Bob successful"
 else
-  echo "     ! FAIL - round-trip failed (expected '$ALICE_MSG', got '$BOB_DECRYPTED')"
+  echo "     ! ${RED}FAIL${NC} - round-trip failed (expected '$ALICE_MSG', got '$BOB_DECRYPTED')"
   exit 1
 fi
 
@@ -650,9 +657,9 @@ BOB_MSG="Confirmed. Reply from Bob."
 ALICE_DECRYPTED=$(cd alice_home && cat ../roundtrip_msg2.bin | "$OTP_BIN" -c bob --decrypt 2>/dev/null)
 
 if [ "$ALICE_DECRYPTED" = "$BOB_MSG" ]; then
-  echo "     - PASS - round-trip Bob->Alice successful"
+  echo "     - ${GREEN}PASS${NC} - round-trip Bob->Alice successful"
 else
-  echo "     ! FAIL - round-trip failed (expected '$BOB_MSG', got '$ALICE_DECRYPTED')"
+  echo "     ! ${RED}FAIL${NC} - round-trip failed (expected '$BOB_MSG', got '$ALICE_DECRYPTED')"
   exit 1
 fi
 
@@ -664,13 +671,13 @@ BOB_DEC_SEQ=$(cd bob_home && "$OTP_BIN" -sc alice 2>/dev/null | grep "DecryptedS
 
 # Alice sent 1, received 1; Bob sent 1, received 1
 if [ "$ALICE_ENC_SEQ" = "1" ] && [ "$ALICE_DEC_SEQ" = "1" ] && [ "$BOB_ENC_SEQ" = "1" ] && [ "$BOB_DEC_SEQ" = "1" ]; then
-  echo "     - PASS - both parties have correct sequence numbers"
+  echo "     - ${GREEN}PASS${NC} - both parties have correct sequence numbers"
 else
-  echo "     ! FAIL - sequence numbers incorrect (Alice enc:$ALICE_ENC_SEQ dec:$ALICE_DEC_SEQ, Bob enc:$BOB_ENC_SEQ dec:$BOB_DEC_SEQ)"
+  echo "     ! ${RED}FAIL${NC} - sequence numbers incorrect (Alice enc:$ALICE_ENC_SEQ dec:$ALICE_DEC_SEQ, Bob enc:$BOB_ENC_SEQ dec:$BOB_DEC_SEQ)"
   exit 1
 fi
 
-echo "     - PASS - full bidirectional communication verified"
+echo "     - ${GREEN}PASS${NC} - full bidirectional communication verified"
 
 rm -rf alice_home bob_home
 rm -f roundtrip_msg1.bin roundtrip_msg2.bin
@@ -692,18 +699,18 @@ dd if=/dev/urandom of=kc_namekey.txt bs=1 count=100 2>/dev/null
 ./bin/otp --add-contact "../escaped" kc_namekey.txt kc_namekey.txt > /dev/null 2>kc_name_stderr.log
 RC=$?
 if [ $RC -ne 0 ] && [ ! -f "../escaped.meta" ] && [ ! -f "../escaped_enc.key" ]; then
-  echo "     - PASS - a name containing a path separator is rejected and writes nothing"
+  echo "     - ${GREEN}PASS${NC} - a name containing a path separator is rejected and writes nothing"
 else
-  echo "     ! FAIL - a path-traversing contact name was accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - a path-traversing contact name was accepted (exit $RC)"
   rm -f ../escaped.meta ../escaped_enc.key ../escaped_dec.key
   exit 1
 fi
 
 grep -q "Invalid contact name" kc_name_stderr.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the rejection says why"
+  echo "     - ${GREEN}PASS${NC} - the rejection says why"
 else
-  echo "     ! FAIL - no explanation given for the rejected name"
+  echo "     ! ${RED}FAIL${NC} - no explanation given for the rejected name"
   cat kc_name_stderr.log
   exit 1
 fi
@@ -712,20 +719,20 @@ REJECTED=0
 for BAD in ".." "." "a/b" "a\\b" "a:b" "a=b" "" "a*b"; do
   ./bin/otp --add-contact "$BAD" kc_namekey.txt kc_namekey.txt > /dev/null 2>&1
   if [ $? -eq 0 ]; then
-    echo "     ! FAIL - invalid contact name '$BAD' was accepted"
+    echo "     ! ${RED}FAIL${NC} - invalid contact name '$BAD' was accepted"
     exit 1
   fi
   REJECTED=$((REJECTED + 1))
 done
-echo "     - PASS - all $REJECTED invalid name forms rejected"
+echo "     - ${GREEN}PASS${NC} - all $REJECTED invalid name forms rejected"
 
 # Ordinary names, including spaces and dots, must still work
 dd if=/dev/urandom of=kc_namekey.txt.dec bs=1 count=$(wc -c < kc_namekey.txt) 2>/dev/null
 ./bin/otp --add-contact "jane.doe smith" kc_namekey.txt kc_namekey.txt.dec > /dev/null 2>&1
 if [ $? -eq 0 ] && [ -f ".keychain/jane.doe smith.meta" ]; then
-  echo "     - PASS - ordinary names with dots and spaces are still accepted"
+  echo "     - ${GREEN}PASS${NC} - ordinary names with dots and spaces are still accepted"
 else
-  echo "     ! FAIL - a legitimate contact name was rejected"
+  echo "     ! ${RED}FAIL${NC} - a legitimate contact name was rejected"
   exit 1
 fi
 
@@ -739,9 +746,9 @@ PERM_ENC=$(ls -l ".keychain/jane.doe smith_enc.key" | cut -c1-10)
 PERM_DEC=$(ls -l ".keychain/jane.doe smith_dec.key" | cut -c1-10)
 
 if [ "$PERM_ENC" = "-rw-------" ] && [ "$PERM_DEC" = "-rw-------" ]; then
-  echo "     - PASS - copied key files are created 0600, not world-readable"
+  echo "     - ${GREEN}PASS${NC} - copied key files are created 0600, not world-readable"
 else
-  echo "     ! FAIL - key files have permissions $PERM_ENC / $PERM_DEC (expected -rw-------)"
+  echo "     ! ${RED}FAIL${NC} - key files have permissions $PERM_ENC / $PERM_DEC (expected -rw-------)"
   exit 1
 fi
 
@@ -768,9 +775,9 @@ RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^halfkeyed" | grep -vc '\.lock$')
 
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - a single key file argument is rejected, creating nothing"
+  echo "     - ${GREEN}PASS${NC} - a single key file argument is rejected, creating nothing"
 else
-  echo "     ! FAIL - a single key file argument was accepted (exit $RC, $CREATED files)"
+  echo "     ! ${RED}FAIL${NC} - a single key file argument was accepted (exit $RC, $CREATED files)"
   exit 1
 fi
 
@@ -781,9 +788,9 @@ RC1=$?
 ./bin/otp --add-contact nokeys > /dev/null 2>&1
 RC2=$?
 if [ $RC1 -eq 0 ] && [ $RC2 -eq 0 ]; then
-  echo "     - PASS - both-keys and no-keys forms still accepted"
+  echo "     - ${GREEN}PASS${NC} - both-keys and no-keys forms still accepted"
 else
-  echo "     ! FAIL - a legitimate add-contact form was rejected ($RC1 / $RC2)"
+  echo "     ! ${RED}FAIL${NC} - a legitimate add-contact form was rejected ($RC1 / $RC2)"
   exit 1
 fi
 
@@ -794,9 +801,9 @@ DUP_RC=$?
 ./bin/otp --remove-contact definitely_not_here > /dev/null 2>&1
 RM_RC=$?
 if [ $DUP_RC -eq 1 ] && [ $RM_RC -eq 1 ]; then
-  echo "     - PASS - failing contact commands exit 1"
+  echo "     - ${GREEN}PASS${NC} - failing contact commands exit 1"
 else
-  echo "     ! FAIL - unexpected exit codes (duplicate add $DUP_RC, missing remove $RM_RC)"
+  echo "     ! ${RED}FAIL${NC} - unexpected exit codes (duplicate add $DUP_RC, missing remove $RM_RC)"
   exit 1
 fi
 
@@ -823,9 +830,9 @@ dd if=/dev/urandom of=kc_otherkey.txt bs=1 count=500 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^samefile" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - the same file passed twice is rejected, creating nothing"
+  echo "     - ${GREEN}PASS${NC} - the same file passed twice is rejected, creating nothing"
 else
-  echo "     ! FAIL - the same key file was accepted for both directions (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - the same key file was accepted for both directions (exit $RC)"
   exit 1
 fi
 
@@ -833,26 +840,26 @@ fi
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^samebytes" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - a copy under a different name is rejected too"
+  echo "     - ${GREEN}PASS${NC} - a copy under a different name is rejected too"
 else
-  echo "     ! FAIL - identical key content under two names was accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - identical key content under two names was accepted (exit $RC)"
   exit 1
 fi
 
 grep -q "contain the same key material" kc_dup2.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal explains why one pad cannot serve both directions"
+  echo "     - ${GREEN}PASS${NC} - the refusal explains why one pad cannot serve both directions"
 else
-  echo "     ! FAIL - refusal not explained"
+  echo "     ! ${RED}FAIL${NC} - refusal not explained"
   cat kc_dup2.log
   exit 1
 fi
 
 ./bin/otp --add-contact distinctkeys kc_dupkey.txt kc_otherkey.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - two genuinely different keys are still accepted"
+  echo "     - ${GREEN}PASS${NC} - two genuinely different keys are still accepted"
 else
-  echo "     ! FAIL - a legitimate key pair was rejected"
+  echo "     ! ${RED}FAIL${NC} - a legitimate key pair was rejected"
   exit 1
 fi
 
@@ -880,26 +887,26 @@ OTP_TEST_FAIL_KEY_COMPARE=1 ./bin/otp --add-contact failclosed kc_fckey1.txt kc_
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^failclosed" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - an uncomparable key pair is refused, creating nothing"
+  echo "     - ${GREEN}PASS${NC} - an uncomparable key pair is refused, creating nothing"
 else
-  echo "     ! FAIL - keys were accepted although the overlap check never ran (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - keys were accepted although the overlap check never ran (exit $RC)"
   exit 1
 fi
 
 grep -q "Could not compare" kc_failcmp.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal names the comparison failure, not a key overlap"
+  echo "     - ${GREEN}PASS${NC} - the refusal names the comparison failure, not a key overlap"
 else
-  echo "     ! FAIL - refusal reason not explained"
+  echo "     ! ${RED}FAIL${NC} - refusal reason not explained"
   cat kc_failcmp.log
   exit 1
 fi
 
 ./bin/otp --add-contact failclosed kc_fckey1.txt kc_fckey2.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the same pair is accepted once the comparison can run"
+  echo "     - ${GREEN}PASS${NC} - the same pair is accepted once the comparison can run"
 else
-  echo "     ! FAIL - pair still refused without the injected failure"
+  echo "     ! ${RED}FAIL${NC} - pair still refused without the injected failure"
   exit 1
 fi
 ./bin/otp --remove-contact failclosed > /dev/null 2>&1
@@ -929,18 +936,18 @@ RC=$?
 grep -q "has been used on this keychain before" kc_reuse.log
 G=$?
 if [ $RC -eq 0 ] && [ $G -eq 0 ]; then
-  echo "     - PASS - re-adding a previously used name warns but still succeeds"
+  echo "     - ${GREEN}PASS${NC} - re-adding a previously used name warns but still succeeds"
 else
-  echo "     ! FAIL - name re-use not warned about (exit $RC, warn $G)"
+  echo "     ! ${RED}FAIL${NC} - name re-use not warned about (exit $RC, warn $G)"
   cat kc_reuse.log
   exit 1
 fi
 
 grep -q "ORIGINAL copies" kc_reuse.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the warning names the actual hazard"
+  echo "     - ${GREEN}PASS${NC} - the warning names the actual hazard"
 else
-  echo "     ! FAIL - the warning does not explain the hazard"
+  echo "     ! ${RED}FAIL${NC} - the warning does not explain the hazard"
   exit 1
 fi
 
@@ -951,9 +958,9 @@ dd if=/dev/urandom of=kc_quietkey1.txt bs=1 count=500 2>/dev/null
 dd if=/dev/urandom of=kc_quietkey2.txt bs=1 count=500 2>/dev/null
 ./bin/otp --add-contact neverseen kc_quietkey1.txt kc_quietkey2.txt > /dev/null 2>kc_quiet.log
 if [ ! -s kc_quiet.log ]; then
-  echo "     - PASS - a fresh contact name produces no warning"
+  echo "     - ${GREEN}PASS${NC} - a fresh contact name produces no warning"
 else
-  echo "     ! FAIL - a fresh name produced output"
+  echo "     ! ${RED}FAIL${NC} - a fresh name produced output"
   cat kc_quiet.log
   exit 1
 fi
@@ -983,17 +990,17 @@ dd if=kc_bigpad.txt of=kc_midslice.txt bs=1024 skip=100 count=100 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^interiortest" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - a slice cut from the middle of a pad is rejected against that pad"
+  echo "     - ${GREEN}PASS${NC} - a slice cut from the middle of a pad is rejected against that pad"
 else
-  echo "     ! FAIL - an interior slice of the same pad was accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - an interior slice of the same pad was accepted (exit $RC)"
   exit 1
 fi
 
 grep -q "appears inside" kc_interior.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal identifies the overlap even though neither end lines up"
+  echo "     - ${GREEN}PASS${NC} - the refusal identifies the overlap even though neither end lines up"
 else
-  echo "     ! FAIL - interior overlap not identified as such"
+  echo "     ! ${RED}FAIL${NC} - interior overlap not identified as such"
   cat kc_interior.log
   exit 1
 fi
@@ -1008,9 +1015,9 @@ dd if=kc_bigpad.txt of=kc_winB.txt bs=1024 skip=100 count=200 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^interiortest" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - two windows sharing only a middle stretch are rejected"
+  echo "     - ${GREEN}PASS${NC} - two windows sharing only a middle stretch are rejected"
 else
-  echo "     ! FAIL - two overlapping windows of one pad were accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - two overlapping windows of one pad were accepted (exit $RC)"
   exit 1
 fi
 
@@ -1019,9 +1026,9 @@ dd if=/dev/urandom of=kc_indep1.txt bs=1024 count=300 2>/dev/null
 dd if=/dev/urandom of=kc_indep2.txt bs=1024 count=100 2>/dev/null
 ./bin/otp --add-contact interiortest kc_indep1.txt kc_indep2.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - two genuinely independent pads are still accepted"
+  echo "     - ${GREEN}PASS${NC} - two genuinely independent pads are still accepted"
 else
-  echo "     ! FAIL - independent pads were refused by the interior check"
+  echo "     ! ${RED}FAIL${NC} - independent pads were refused by the interior check"
   exit 1
 fi
 ./bin/otp --remove-contact interiortest > /dev/null 2>&1
@@ -1050,17 +1057,17 @@ dd if=/dev/urandom of=kc_ccD.txt bs=1 count=500 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - a pad already serving as another contact's encryption key is rejected"
+  echo "     - ${GREEN}PASS${NC} - a pad already serving as another contact's encryption key is rejected"
 else
-  echo "     ! FAIL - the same pad was installed for two contacts (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - the same pad was installed for two contacts (exit $RC)"
   exit 1
 fi
 
 grep -q "contact 'ccfirst'" kc_cc1.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal names the contact already holding that pad"
+  echo "     - ${GREEN}PASS${NC} - the refusal names the contact already holding that pad"
 else
-  echo "     ! FAIL - refusal does not say which contact holds the pad"
+  echo "     ! ${RED}FAIL${NC} - refusal does not say which contact holds the pad"
   cat kc_cc1.log
   exit 1
 fi
@@ -1069,9 +1076,9 @@ fi
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - the decryption direction is checked too"
+  echo "     - ${GREEN}PASS${NC} - the decryption direction is checked too"
 else
-  echo "     ! FAIL - a shared decryption pad was accepted (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - a shared decryption pad was accepted (exit $RC)"
   exit 1
 fi
 
@@ -1083,9 +1090,9 @@ dd if=kc_ccA.txt of=kc_ccA_tail.txt bs=1 skip=100 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^ccsecond" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - a remainder of an installed pad is rejected across contacts too"
+  echo "     - ${GREEN}PASS${NC} - a remainder of an installed pad is rejected across contacts too"
 else
-  echo "     ! FAIL - a tail of an installed pad was accepted for another contact (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - a tail of an installed pad was accepted for another contact (exit $RC)"
   exit 1
 fi
 
@@ -1093,18 +1100,18 @@ fi
 # that is how loopback testing in one directory works, but warned about.
 ./bin/otp --add-contact ccmirror kc_ccB.txt kc_ccA.txt > /dev/null 2>kc_ccmirror.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the mirrored pair of an existing contact is allowed for loopback use"
+  echo "     - ${GREEN}PASS${NC} - the mirrored pair of an existing contact is allowed for loopback use"
 else
-  echo "     ! FAIL - the mirrored (other-endpoint) pair was refused"
+  echo "     ! ${RED}FAIL${NC} - the mirrored (other-endpoint) pair was refused"
   cat kc_ccmirror.log
   exit 1
 fi
 
 grep -q "other endpoint" kc_ccmirror.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the mirror add warns that it looks like the pad's other endpoint"
+  echo "     - ${GREEN}PASS${NC} - the mirror add warns that it looks like the pad's other endpoint"
 else
-  echo "     ! FAIL - no other-endpoint warning for the mirrored pair"
+  echo "     ! ${RED}FAIL${NC} - no other-endpoint warning for the mirrored pair"
   cat kc_ccmirror.log
   exit 1
 fi
@@ -1112,9 +1119,9 @@ fi
 # Genuinely fresh keys must still be accepted while the others are installed
 ./bin/otp --add-contact ccsecond kc_ccC.txt kc_ccD.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - unrelated key material is still accepted alongside them"
+  echo "     - ${GREEN}PASS${NC} - unrelated key material is still accepted alongside them"
 else
-  echo "     ! FAIL - unrelated keys were refused by the cross-contact check"
+  echo "     ! ${RED}FAIL${NC} - unrelated keys were refused by the cross-contact check"
   exit 1
 fi
 
@@ -1149,9 +1156,9 @@ printf 'x' | OTP_TEST_FAIL_SPENT_RECORD=1 ./bin/otp -c spentowner --encrypt > /d
 RC=$?
 OFFSET=$(./bin/otp --show-contact spentowner | grep "EncryptionKeyOffset:" | awk '{print $2}')
 if [ $RC -ne 0 ] && [ "$OFFSET" = "0" ]; then
-  echo "     - PASS - a failed fingerprint record aborts before any key is spent"
+  echo "     - ${GREEN}PASS${NC} - a failed fingerprint record aborts before any key is spent"
 else
-  echo "     ! FAIL - key was spent although its fingerprint could not be recorded (exit $RC, offset $OFFSET)"
+  echo "     ! ${RED}FAIL${NC} - key was spent although its fingerprint could not be recorded (exit $RC, offset $OFFSET)"
   exit 1
 fi
 
@@ -1166,17 +1173,17 @@ dd if=/dev/urandom of=kc_freshdec.txt bs=1 count=500 2>/dev/null
 RC=$?
 CREATED=$(ls .keychain/ 2>/dev/null | grep "^freshname" | grep -vc '\.lock$')
 if [ $RC -ne 0 ] && [ "$CREATED" = "0" ]; then
-  echo "     - PASS - the spent original is rejected even under a fresh contact name"
+  echo "     - ${GREEN}PASS${NC} - the spent original is rejected even under a fresh contact name"
 else
-  echo "     ! FAIL - a spent original key was re-installed under a new name (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - a spent original key was re-installed under a new name (exit $RC)"
   exit 1
 fi
 
 grep -q "already spent" kc_spent.log
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the refusal explains that the key material was already spent here"
+  echo "     - ${GREEN}PASS${NC} - the refusal explains that the key material was already spent here"
 else
-  echo "     ! FAIL - refusal does not explain the spent-key hazard"
+  echo "     ! ${RED}FAIL${NC} - refusal does not explain the spent-key hazard"
   cat kc_spent.log
   exit 1
 fi
@@ -1186,9 +1193,9 @@ fi
 dd if=kc_spentkey.txt of=kc_spentremainder.txt bs=1 skip=14 2>/dev/null
 ./bin/otp --add-contact freshname kc_spentremainder.txt kc_freshdec.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - the partially consumed remainder is still accepted"
+  echo "     - ${GREEN}PASS${NC} - the partially consumed remainder is still accepted"
 else
-  echo "     ! FAIL - the legitimate remainder was refused"
+  echo "     ! ${RED}FAIL${NC} - the legitimate remainder was refused"
   exit 1
 fi
 ./bin/otp --remove-contact freshname > /dev/null 2>&1
@@ -1198,9 +1205,9 @@ fi
 dd if=/dev/urandom of=kc_newenc.txt bs=1 count=500 2>/dev/null
 ./bin/otp --add-contact unspentreuse kc_newenc.txt kc_spentdec.txt > /dev/null 2>&1
 if [ $? -eq 0 ]; then
-  echo "     - PASS - a never-consumed key from the removed contact is still accepted"
+  echo "     - ${GREEN}PASS${NC} - a never-consumed key from the removed contact is still accepted"
 else
-  echo "     ! FAIL - an unspent key was refused as if it had been consumed"
+  echo "     ! ${RED}FAIL${NC} - an unspent key was refused as if it had been consumed"
   exit 1
 fi
 ./bin/otp --remove-contact unspentreuse > /dev/null 2>&1

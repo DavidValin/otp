@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # These tests exercise machinery other than the delivery-confirmation gate
 # (see test/confirm.test.sh for that), so state the confirmation explicitly:
 # without it, every message after a direction's first would prompt on the
@@ -48,9 +55,9 @@ wait $PIDB
 RCB=$?
 
 if [ $RCA -eq 0 ] && [ $RCB -eq 0 ]; then
-  echo "     - PASS - both concurrent operations on different contacts succeeded"
+  echo "     - ${GREEN}PASS${NC} - both concurrent operations on different contacts succeeded"
 else
-  echo "     ! FAIL - a concurrent operation on a different contact failed (A=$RCA B=$RCB)"
+  echo "     ! ${RED}FAIL${NC} - a concurrent operation on a different contact failed (A=$RCA B=$RCB)"
   cat meta_stderrA.log meta_stderrB.log
   exit 1
 fi
@@ -67,9 +74,9 @@ SEQ_B_OK=$(echo "$OUTPUT_B" | grep -c "EncryptedSequence: 1")
 OFF_B_OK=$(echo "$OUTPUT_B" | grep -c "EncryptionKeyOffset: $LENB")
 
 if [ "$SEQ_A_OK" = "1" ] && [ "$OFF_A_OK" = "1" ] && [ "$SEQ_B_OK" = "1" ] && [ "$OFF_B_OK" = "1" ]; then
-  echo "     - PASS - both contacts' metadata reflects their own update - neither was overwritten by the other"
+  echo "     - ${GREEN}PASS${NC} - both contacts' metadata reflects their own update - neither was overwritten by the other"
 else
-  echo "     ! FAIL - one contact's metadata update was lost, overwritten by the other's concurrent save"
+  echo "     ! ${RED}FAIL${NC} - one contact's metadata update was lost, overwritten by the other's concurrent save"
   echo "$OUTPUT_A"
   echo "$OUTPUT_B"
   exit 1
@@ -91,9 +98,9 @@ cmp -s meta_cipherB.bin meta_expectedB.bin
 CIPHER_B_OK=$?
 
 if [ $CIPHER_A_OK -eq 0 ] && [ $CIPHER_B_OK -eq 0 ]; then
-  echo "     - PASS - both ciphertexts are correct"
+  echo "     - ${GREEN}PASS${NC} - both ciphertexts are correct"
 else
-  echo "     ! FAIL - a ciphertext does not match its expected value"
+  echo "     ! ${RED}FAIL${NC} - a ciphertext does not match its expected value"
   exit 1
 fi
 
@@ -131,9 +138,9 @@ RC=$?
 META_AFTER=$(wc -c < .keychain/bulky.meta | tr -d ' ')
 
 if [ $RC -eq 0 ] && [ "$META_AFTER" -lt 4096 ]; then
-  echo "     - PASS - .meta stayed small after a 14MB message ($META_EMPTY -> $META_AFTER bytes)"
+  echo "     - ${GREEN}PASS${NC} - .meta stayed small after a 14MB message ($META_EMPTY -> $META_AFTER bytes)"
 else
-  echo "     ! FAIL - .meta grew to $META_AFTER bytes after a 14MB message (exit $RC)"
+  echo "     ! ${RED}FAIL${NC} - .meta grew to $META_AFTER bytes after a 14MB message (exit $RC)"
   exit 1
 fi
 
@@ -145,9 +152,9 @@ RC=$?
 OFFSET=$(grep '^EncryptionKeyOffset=' .keychain/bulky.meta | cut -d= -f2)
 
 if [ $RC -eq 0 ] && [ "$OFFSET" = "14680064" ]; then
-  echo "     - PASS - a later process reloads and re-saves that .meta safely"
+  echo "     - ${GREEN}PASS${NC} - a later process reloads and re-saves that .meta safely"
 else
-  echo "     ! FAIL - reload/re-save after a large message misbehaved (exit $RC, offset $OFFSET)"
+  echo "     ! ${RED}FAIL${NC} - reload/re-save after a large message misbehaved (exit $RC, offset $OFFSET)"
   exit 1
 fi
 

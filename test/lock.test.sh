@@ -1,5 +1,12 @@
 #!/bin/sh
 
+# colors for PASS/FAIL output (disabled when stdout is not a terminal)
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
+
 # These tests exercise machinery other than the delivery-confirmation gate
 # (see test/confirm.test.sh for that), so state the confirmation explicitly:
 # without it, every message after a direction's first would prompt on the
@@ -37,9 +44,9 @@ dd if=/dev/urandom of=lock_key1.txt.dec bs=1 count=$(wc -c < lock_key1.txt) 2>/d
 printf 'trigger lock creation' | ./bin/otp -c locktest1 --encrypt > /dev/null 2>/dev/null
 
 if [ -f ".keychain/locktest1.lock" ]; then
-  echo "     - PASS - lock file created at .keychain/<contact>.lock"
+  echo "     - ${GREEN}PASS${NC} - lock file created at .keychain/<contact>.lock"
 else
-  echo "     ! FAIL - lock file not found at the expected location"
+  echo "     ! ${RED}FAIL${NC} - lock file not found at the expected location"
   ls .keychain/ 2>&1
   exit 1
 fi
@@ -73,9 +80,9 @@ wait $PIDB
 RCB=$?
 
 if [ $RCA -eq 0 ] && [ $RCB -eq 0 ]; then
-  echo "     - PASS - both concurrent operations completed successfully"
+  echo "     - ${GREEN}PASS${NC} - both concurrent operations completed successfully"
 else
-  echo "     ! FAIL - a concurrent operation failed (A=$RCA B=$RCB)"
+  echo "     ! ${RED}FAIL${NC} - a concurrent operation failed (A=$RCA B=$RCB)"
   cat lock_stderrA.log
   cat lock_stderrB.log
   exit 1
@@ -110,14 +117,14 @@ OFFA=$(find_offset lock_plainA.txt lock_cipherA.bin)
 OFFB=$(find_offset lock_plainB.txt lock_cipherB.bin)
 
 if [ "$OFFA" = "NONE" ] || [ "$OFFB" = "NONE" ]; then
-  echo "     ! FAIL - a ciphertext does not correspond to any expected key range at all"
+  echo "     ! ${RED}FAIL${NC} - a ciphertext does not correspond to any expected key range at all"
   exit 1
 fi
 
 if [ "$OFFA" != "$OFFB" ]; then
-  echo "     - PASS - the two concurrent messages used disjoint key ranges ($OFFA and $OFFB)"
+  echo "     - ${GREEN}PASS${NC} - the two concurrent messages used disjoint key ranges ($OFFA and $OFFB)"
 else
-  echo "     ! FAIL - both concurrent messages used the SAME key range ($OFFA) - key reuse!"
+  echo "     ! ${RED}FAIL${NC} - both concurrent messages used the SAME key range ($OFFA) - key reuse!"
   exit 1
 fi
 
@@ -125,18 +132,18 @@ TOTAL=$((LENA + LENB))
 OUTPUT=$(./bin/otp --show-contact locktest2)
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: $TOTAL"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - final key offset accounts for both messages exactly once each"
+  echo "     - ${GREEN}PASS${NC} - final key offset accounts for both messages exactly once each"
 else
-  echo "     ! FAIL - final key offset does not match the sum of both messages"
+  echo "     ! ${RED}FAIL${NC} - final key offset does not match the sum of both messages"
   echo "$OUTPUT"
   exit 1
 fi
 
 echo "$OUTPUT" | grep -q "EncryptedSequence: 2"
 if [ $? -eq 0 ]; then
-  echo "     - PASS - sequence counted both messages exactly once each"
+  echo "     - ${GREEN}PASS${NC} - sequence counted both messages exactly once each"
 else
-  echo "     ! FAIL - sequence does not reflect both messages"
+  echo "     ! ${RED}FAIL${NC} - sequence does not reflect both messages"
   exit 1
 fi
 
@@ -172,9 +179,9 @@ wait $DPIDB
 DRCB=$?
 
 if [ $DRCA -eq 0 ] && [ $DRCB -eq 0 ]; then
-  echo "     - PASS - both concurrent decrypts completed successfully"
+  echo "     - ${GREEN}PASS${NC} - both concurrent decrypts completed successfully"
 else
-  echo "     ! FAIL - a concurrent decrypt failed (A=$DRCA B=$DRCB)"
+  echo "     ! ${RED}FAIL${NC} - a concurrent decrypt failed (A=$DRCA B=$DRCB)"
   cat lock_dstderrA.log lock_dstderrB.log
   exit 1
 fi
@@ -201,14 +208,14 @@ DOFFA=$(find_dec_offset lock_ctA.bin lock_ptA.bin)
 DOFFB=$(find_dec_offset lock_ctB.bin lock_ptB.bin)
 
 if [ "$DOFFA" = "NONE" ] || [ "$DOFFB" = "NONE" ]; then
-  echo "     ! FAIL - a plaintext does not correspond to any expected key range"
+  echo "     ! ${RED}FAIL${NC} - a plaintext does not correspond to any expected key range"
   exit 1
 fi
 
 if [ "$DOFFA" != "$DOFFB" ]; then
-  echo "     - PASS - the two concurrent decrypts used disjoint key ranges ($DOFFA and $DOFFB)"
+  echo "     - ${GREEN}PASS${NC} - the two concurrent decrypts used disjoint key ranges ($DOFFA and $DOFFB)"
 else
-  echo "     ! FAIL - both concurrent decrypts used the SAME key range ($DOFFA) - key reuse!"
+  echo "     ! ${RED}FAIL${NC} - both concurrent decrypts used the SAME key range ($DOFFA) - key reuse!"
   exit 1
 fi
 
@@ -219,9 +226,9 @@ DSEQ=$(echo "$DOUT" | grep -c "DecryptedSequence: 2")
 DOFF=$(echo "$DOUT" | grep -c "DecryptionKeyOffset: $DTOTAL")
 
 if [ "$DSEQ" = "1" ] && [ "$DOFF" = "1" ]; then
-  echo "     - PASS - decryption key offset and sequence count both messages exactly once"
+  echo "     - ${GREEN}PASS${NC} - decryption key offset and sequence count both messages exactly once"
 else
-  echo "     ! FAIL - decrypt bookkeeping wrong after concurrent operations"
+  echo "     ! ${RED}FAIL${NC} - decrypt bookkeeping wrong after concurrent operations"
   echo "$DOUT"
   exit 1
 fi
@@ -269,17 +276,17 @@ if command -v flock > /dev/null 2>&1; then
   ELAPSED=$((END - START))
 
   if [ "$ELAPSED" -ge 2 ] && [ $ADD_RC -eq 0 ]; then
-    echo "     - PASS - the add blocked on the held contact lock (~${ELAPSED}s) then completed"
+    echo "     - ${GREEN}PASS${NC} - the add blocked on the held contact lock (~${ELAPSED}s) then completed"
   else
-    echo "     ! FAIL - the add did not wait for the contact lock (waited ${ELAPSED}s, exit $ADD_RC)"
+    echo "     ! ${RED}FAIL${NC} - the add did not wait for the contact lock (waited ${ELAPSED}s, exit $ADD_RC)"
     cat lock_addblock.log
     exit 1
   fi
 
   if [ -f ".keychain/addblock.meta" ]; then
-    echo "     - PASS - the contact was actually added once the lock was released"
+    echo "     - ${GREEN}PASS${NC} - the contact was actually added once the lock was released"
   else
-    echo "     ! FAIL - the contact was not added after the lock cleared"
+    echo "     ! ${RED}FAIL${NC} - the contact was not added after the lock cleared"
     exit 1
   fi
   rm -f lock_addblock.log
@@ -312,16 +319,16 @@ METAS=$(ls .keychain/ 2>/dev/null | grep -c '^racer\.meta$')
 KEYS=$(ls .keychain/ 2>/dev/null | grep -c '^racer_.*\.key$')
 
 if [ "$SUCCESS" = "1" ]; then
-  echo "     - PASS - exactly one of 15 concurrent adds succeeded"
+  echo "     - ${GREEN}PASS${NC} - exactly one of 15 concurrent adds succeeded"
 else
-  echo "     ! FAIL - $SUCCESS concurrent adds reported success (expected exactly 1) - a lost/duplicated add"
+  echo "     ! ${RED}FAIL${NC} - $SUCCESS concurrent adds reported success (expected exactly 1) - a lost/duplicated add"
   exit 1
 fi
 
 if [ "$METAS" = "1" ] && [ "$KEYS" = "2" ]; then
-  echo "     - PASS - the keychain holds exactly one intact 'racer' (1 .meta, 2 .key files)"
+  echo "     - ${GREEN}PASS${NC} - the keychain holds exactly one intact 'racer' (1 .meta, 2 .key files)"
 else
-  echo "     ! FAIL - keychain state after the race is wrong ($METAS meta, $KEYS key files)"
+  echo "     ! ${RED}FAIL${NC} - keychain state after the race is wrong ($METAS meta, $KEYS key files)"
   ls .keychain/
   exit 1
 fi
@@ -329,9 +336,9 @@ fi
 # The single surviving contact must be usable: a round-trip through it works.
 printf 'race survivor payload' | ./bin/otp -c racer --encrypt > lock_racecipher.bin 2>/dev/null
 if [ -s lock_racecipher.bin ]; then
-  echo "     - PASS - the surviving contact encrypts normally"
+  echo "     - ${GREEN}PASS${NC} - the surviving contact encrypts normally"
 else
-  echo "     ! FAIL - the surviving contact could not be used to encrypt"
+  echo "     ! ${RED}FAIL${NC} - the surviving contact could not be used to encrypt"
   exit 1
 fi
 
