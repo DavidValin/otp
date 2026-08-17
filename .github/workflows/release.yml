@@ -46,6 +46,20 @@ jobs:
             runner: ubuntu-latest
             make_target: musl
             setup: musl
+          # Native arm64 runner: `make build` compiles natively and runs
+          # the full test suite on arm64 Linux.
+          - artifact: otp-aarch64_linux
+            runner: ubuntu-24.04-arm
+            make_target: build
+            setup: ''
+          # `make arm32` cross-compiles the 32-bit ARM hard-float binary
+          # (Raspberry Pi OS 32-bit and similar). The test suite cannot run
+          # here (the binary targets another architecture), but the same
+          # sources are fully tested natively on x86_64 and arm64.
+          - artifact: otp-armv7l_linux
+            runner: ubuntu-latest
+            make_target: arm32
+            setup: arm32
           - artifact: otp-aarch64_macos
             runner: macos-14
             make_target: build
@@ -71,6 +85,10 @@ jobs:
       - name: Install MinGW-w64 toolchain
         if: matrix.setup == 'mingw'
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install ARM cross toolchain
+        if: matrix.setup == 'arm32'
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
 
       - name: Build and test
         run: make ${{ matrix.make_target }}
