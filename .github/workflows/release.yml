@@ -62,10 +62,12 @@ jobs:
             runner: ubuntu-latest
             make_target: test-arm32
             setup: arm32
+            qemu: qemu-arm
           - artifact: otp-riscv64_linux
             runner: ubuntu-latest
             make_target: test-riscv64
             setup: riscv64
+            qemu: qemu-riscv64
           - artifact: otp-aarch64_macos
             runner: macos-14
             make_target: build
@@ -103,11 +105,39 @@ jobs:
       - name: Build and test
         run: make ${{ matrix.make_target }}
 
+      # Re-runs the suite through test/report.sh to render test-report.html
+      # for this platform. For the qemu-tested targets the binary cannot run
+      # natively, so bin/otp is temporarily replaced by the same qemu wrapper
+      # the Makefile's test-arm32/test-riscv64 targets use. mingw is the one
+      # target with no report: its binary is a Windows executable the runner
+      # cannot execute.
+      - name: Generate HTML test report
+        if: matrix.make_target != 'mingw'
+        run: |
+          if [ -n "${{ matrix.qemu }}" ]; then
+            QEMU=$(command -v ${{ matrix.qemu }} || command -v ${{ matrix.qemu }}-static)
+            mv bin/otp bin/otp.target
+            printf '#!/bin/sh\nexec %s "$(dirname "$0")/otp.target" "$@"\n' "$QEMU" > bin/otp
+            chmod +x bin/otp
+            sh test/report.sh
+            mv bin/otp.target bin/otp
+          else
+            sh test/report.sh
+          fi
+
+      - name: Upload test report
+        if: matrix.make_target != 'mingw'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.artifact }}
+          path: test-report.html
+
       - name: Archive artifact (unix)
         if: matrix.make_target != 'mingw'
         run: |
           chmod +x bin/otp
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C bin otp
+          cp otp.1 test-report.html bin/
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C bin otp otp.1 test-report.html
 
       - name: Archive artifact (windows)
         if: matrix.make_target == 'mingw'
@@ -146,12 +176,21 @@ jobs:
           release: "14.3"
           usesh: true
           prepare: pkg install -y gmake bash
-          run: gmake CC=cc build
+          run: |
+            gmake CC=cc build
+            sh test/report.sh
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-otp-x86_64_freebsd
+          path: test-report.html
 
       - name: Archive artifact
         run: |
           chmod +x bin/otp
-          tar -czf otp-x86_64_freebsd.tar.gz -C bin otp
+          cp otp.1 test-report.html bin/
+          tar -czf otp-x86_64_freebsd.tar.gz -C bin otp otp.1 test-report.html
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -173,12 +212,21 @@ jobs:
           release: "7.7"
           usesh: true
           prepare: pkg_add gmake bash
-          run: gmake CC=cc build
+          run: |
+            gmake CC=cc build
+            sh test/report.sh
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-otp-x86_64_openbsd
+          path: test-report.html
 
       - name: Archive artifact
         run: |
           chmod +x bin/otp
-          tar -czf otp-x86_64_openbsd.tar.gz -C bin otp
+          cp otp.1 test-report.html bin/
+          tar -czf otp-x86_64_openbsd.tar.gz -C bin otp otp.1 test-report.html
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -200,12 +248,21 @@ jobs:
           release: "10.1"
           usesh: true
           prepare: /usr/sbin/pkg_add gmake bash
-          run: gmake CC=cc build
+          run: |
+            gmake CC=cc build
+            sh test/report.sh
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-otp-x86_64_netbsd
+          path: test-report.html
 
       - name: Archive artifact
         run: |
           chmod +x bin/otp
-          tar -czf otp-x86_64_netbsd.tar.gz -C bin otp
+          cp otp.1 test-report.html bin/
+          tar -czf otp-x86_64_netbsd.tar.gz -C bin otp otp.1 test-report.html
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -225,10 +282,15 @@ jobs:
     needs: [guard, build, build-freebsd, build-openbsd, build-netbsd]
     runs-on: ubuntu-latest
     steps:
+      # Only the otp-* build artifacts become release assets. The
+      # test-report-* artifacts stay as workflow-run files: they all
+      # contain a file named test-report.html, so merging them here would
+      # collide, and each platform's report is already inside its tarball.
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: assets
+          pattern: otp-*
           merge-multiple: true
 
       - name: Create release and upload assets
