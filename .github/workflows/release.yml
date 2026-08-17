@@ -60,6 +60,14 @@ jobs:
             runner: ubuntu-latest
             make_target: arm32
             setup: arm32
+          # `make riscv64` cross-compiles a static riscv64 binary. Unlike
+          # the other cross builds, the full test suite DOES run here: the
+          # binary is static, so qemu-user binfmt emulation executes it
+          # transparently with no target sysroot.
+          - artifact: otp-riscv64_linux
+            runner: ubuntu-latest
+            make_target: riscv64
+            setup: riscv64
           - artifact: otp-aarch64_macos
             runner: macos-14
             make_target: build
@@ -90,8 +98,21 @@ jobs:
         if: matrix.setup == 'arm32'
         run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
 
+      - name: Install RISC-V cross toolchain and qemu
+        if: matrix.setup == 'riscv64'
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu qemu-user-static
+
       - name: Build and test
         run: make ${{ matrix.make_target }}
+
+      # qemu-user-static registers binfmt handlers, so the static riscv64
+      # binary runs transparently and the test scripts need no changes.
+      - name: Test riscv64 binary under qemu emulation
+        if: matrix.setup == 'riscv64'
+        run: |
+          for t in otp keychain commit lock metadata confirm truncate; do
+            bash "test/$t.test.sh" || exit 1
+          done
 
       - name: Archive artifact (unix)
         if: matrix.make_target != 'mingw'

@@ -106,6 +106,19 @@ arm32:
 	@echo " - Built bin/otp (arm32)!"
 	@echo
 
+# Cross-compile a Linux riscv64 binary (gcc-riscv64-linux-gnu). Built
+# static - the program uses no NSS/dlopen functionality, so static glibc
+# is safe - which lets the binary run on any riscv64 Linux system and
+# lets CI run the full test suite against it under qemu-user emulation
+# with no target sysroot.
+riscv64:
+	@echo
+	@echo " - Cross-compiling Linux riscv64 static binary..."
+	@mkdir -p bin
+	@riscv64-linux-gnu-gcc -static -Wall -Wextra -O2 -D_FILE_OFFSET_BITS=64 -o $(BIN) src/otp.c src/keychain.c src/commit.c
+	@echo " - Built bin/otp (riscv64)!"
+	@echo
+
 install-musl:
 	@echo
 	@echo " - Installing musl binary..."
