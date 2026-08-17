@@ -121,6 +121,98 @@ jobs:
             ${{ matrix.artifact }}.tar.gz
             ${{ matrix.artifact }}.zip
 
+  # GitHub provides no BSD runners, so the three jobs below each boot the
+  # matching vmactions VM on the Ubuntu runner and build and test inside
+  # it. The sources need no changes on any BSD (the code's only platform
+  # split is Windows vs POSIX); only the invocation differs: gmake because
+  # the Makefile is GNU-make syntax and base `make` is BSD make, CC=cc to
+  # use each system's native compiler (clang on FreeBSD/OpenBSD, gcc on
+  # NetBSD), and bash from packages because the Makefile runs the test
+  # scripts through it. Each action copies the working directory back to
+  # the host after `run`, so bin/otp is archived and uploaded exactly like
+  # the matrix artifacts. These are separate jobs rather than a matrix
+  # because `uses:` cannot be parameterized by a matrix expression.
+  build-freebsd:
+    name: Build (otp-x86_64_freebsd)
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: pkg install -y gmake bash
+          run: gmake CC=cc build
+
+      - name: Archive artifact
+        run: |
+          chmod +x bin/otp
+          tar -czf otp-x86_64_freebsd.tar.gz -C bin otp
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: otp-x86_64_freebsd
+          path: otp-x86_64_freebsd.tar.gz
+
+  build-openbsd:
+    name: Build (otp-x86_64_openbsd)
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in OpenBSD VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          release: "7.7"
+          usesh: true
+          prepare: pkg_add gmake bash
+          run: gmake CC=cc build
+
+      - name: Archive artifact
+        run: |
+          chmod +x bin/otp
+          tar -czf otp-x86_64_openbsd.tar.gz -C bin otp
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: otp-x86_64_openbsd
+          path: otp-x86_64_openbsd.tar.gz
+
+  build-netbsd:
+    name: Build (otp-x86_64_netbsd)
+    needs: guard
+    if: needs.guard.outputs.ok == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in NetBSD VM
+        uses: vmactions/netbsd-vm@v1
+        with:
+          release: "10.1"
+          usesh: true
+          prepare: /usr/sbin/pkg_add gmake bash
+          run: gmake CC=cc build
+
+      - name: Archive artifact
+        run: |
+          chmod +x bin/otp
+          tar -czf otp-x86_64_netbsd.tar.gz -C bin otp
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: otp-x86_64_netbsd
+          path: otp-x86_64_netbsd.tar.gz
+
   release:
     name: Create release & upload assets
     # No `if:` - the default gating is exactly what a release wants: every
@@ -130,7 +222,7 @@ jobs:
     # even when build jobs failed - with the broken targets silently
     # missing from the assets - and created an empty release for tags not
     # on main.
-    needs: [guard, build]
+    needs: [guard, build, build-freebsd, build-openbsd, build-netbsd]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
