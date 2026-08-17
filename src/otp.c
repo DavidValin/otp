@@ -1,6 +1,6 @@
 /*****************************************************************************\
  *                                                                            *
- *   otp v1.1.0                                                               *
+ *   otp v1.2.0                                                               *
  *                                                                            *
  *    simple but effective one time pad encryption / decryption command       *
  *    that works with stdin/stdout and saves next unused key file.            *

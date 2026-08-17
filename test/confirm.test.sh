@@ -267,6 +267,10 @@ else
   exit 1
 fi
 
+# -----------------------------------------------------------------------------
+#  cleanup
+# -----------------------------------------------------------------------------
+
 echo "     Cleaning up test files..."
 rm -f confirm_key1.txt confirm_key1.txt.dec confirm_key2.txt confirm_key2.txt.dec \
       confirm_key3.txt confirm_key3.txt.dec confirm_plain1.txt confirm_plain2.txt \

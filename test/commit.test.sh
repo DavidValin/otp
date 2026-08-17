@@ -1231,6 +1231,7 @@ fi
 echo "     Cleaning up test files..."
 
 rm -rf .keychain
+rm -f commit_*
 
 echo ""
 exit 0

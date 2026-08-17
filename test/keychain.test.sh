@@ -1227,6 +1227,8 @@ rm -f encryption_dectest.txt decryption_dectest.txt
 rm -f encryption_alice.txt decryption_alice.txt
 rm -f encryption_bob.txt decryption_bob.txt
 rm -f smallkey.txt roundtrip_msg1.bin roundtrip_msg2.bin
+rm -f smallkey.txt.dec kc_* multichunk_key*
+rm -f test_plain.txt test_plain2.txt test_cipher.bin test_cipher2.bin test_decrypted.txt
 
 echo ""
 exit 0

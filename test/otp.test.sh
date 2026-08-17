@@ -56,6 +56,9 @@ else
   exit 1
 fi
 
+# the decryption run above writes its own timestamped .next file - remove it
+rm -f ./test/test_data/test.txt.*.next
+
 # -----------------------------------------------------------------------------
 #  test key pair generation
 # -----------------------------------------------------------------------------
@@ -102,6 +105,12 @@ if [ "$decryption_a" != "$encryption_b" ]; then
 fi
 echo "     - ${GREEN}PASS${NC} - key pair is symetric"
 echo ""
+
+# -----------------------------------------------------------------------------
+#  cleanup
+# -----------------------------------------------------------------------------
+
+echo "     Cleaning up test files..."
 
 rm encryption_${PARTA}.txt decryption_${PARTA}.txt encryption_${PARTB}.txt decryption_${PARTB}.txt
 exit 0
