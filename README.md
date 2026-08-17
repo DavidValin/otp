@@ -8,6 +8,38 @@ This program allows you to operate using one time pad cipher and a keychain. It 
 
 When using the one time pad algorithm, it is critical to remember to never reuse the part of the key that was used. The keychain enforces this automatically: every encrypt/decrypt consumes its key bytes and physically destroys them, so a spent key range can never serve a second message.
 
+## Index
+
+- [Installation](#installation)
+- [New key pair generation](#new-key-pair-generation)
+  - [True Random key generator](#true-random-key-generator)
+- [Keychain Management Commands](#keychain-management-commands)
+  - [Keychain Features](#keychain-features)
+  - [The `.keychain/` directory](#the-keychain-directory)
+  - [Stages of one encrypt/decrypt operation](#stages-of-one-encryptdecrypt-operation)
+- [One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)
+- [Accidental mid-crash protection](#accidental-mid-crash-protection)
+  - [One Time Pad encryption](#one-time-pad-encryption)
+  - [One Time Pad decryption](#one-time-pad-decryption)
+  - [What this does not cover](#what-this-does-not-cover)
+- [Files written to disk](#files-written-to-disk)
+- [How to use (encryption / decryption)](#how-to-use-encryption--decryption)
+  - [Using the Keychain System](#using-the-keychain-system)
+    - [Two keys per contact, mirrored between the two parties](#two-keys-per-contact-mirrored-between-the-two-parties)
+    - [Setup Keychain](#setup-keychain)
+    - [Encrypt and Decrypt with Keychain](#encrypt-and-decrypt-with-keychain)
+    - [Example Workflow](#example-workflow)
+    - [Important Notes](#important-notes)
+- [Crash-safe key consumption](#crash-safe-key-consumption)
+  - [Why a naive implementation isn't enough](#why-a-naive-implementation-isnt-enough)
+  - [The fix: commit before delivery, verify everything, never guess on recovery](#the-fix-commit-before-delivery-verify-everything-never-guess-on-recovery)
+  - [Recovering from a crash](#recovering-from-a-crash)
+  - [Why decrypt needs this even more than encrypt](#why-decrypt-needs-this-even-more-than-encrypt)
+  - [Per-contact locking](#per-contact-locking)
+  - [Per-contact metadata files](#per-contact-metadata-files)
+  - [Self-healing metadata](#self-healing-metadata)
+  - [Known limitations](#known-limitations)
+
 ## Installation
 
 * Easy way: [Download](https://github.com/DavidValin/otp/releases)
