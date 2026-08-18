@@ -70,6 +70,15 @@ void cleanup_keychain(void);
 //
 // Resolve (and create if missing) the keychain directory.
 int get_keychain_dir(char *dir_path, size_t dir_path_size);
+// Append `size` bytes of randomness read from stdin to the keychain's
+// randomness vault (<keychain_dir>/_randomness), creating it (mode 0600)
+// on first use. Not tied to any contact, but still flock()'d
+// (<keychain_dir>/_randomness.lock) against concurrent appends, and the
+// incoming bytes are staged and read-back verified before the vault
+// itself is ever touched - a short read from stdin leaves it unchanged.
+// On success, *out_total_size (if non-NULL) receives the vault's total
+// size after this call.
+int add_rand_to_vault(size_t size, size_t *out_total_size);
 // Persist one contact's metadata atomically and verified.
 int save_contact_meta(const char *keychain_dir, Contact *c);
 // Record a key file's head in the spent-heads registry; direction is

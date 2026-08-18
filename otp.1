@@ -38,6 +38,9 @@ otp \- simple one-time pad encryption/decryption utility
 .br
 .B otp
 [-rl | --recover-last] <contact_name> --sent|--received
+.br
+.B otp
+--add-rand-to-vault <size_in_MB>
 
 .SH DESCRIPTION
 This program takes data from standard input, XORs it with one-time-pad key material held in a keychain of contacts, and writes the result to standard output.  Consumed key material is removed from the key files automatically, so a spent key range can never be reused.  It also allows generating key pairs and managing the keychain of contacts.
@@ -90,6 +93,10 @@ Report the contact's per-direction state, verified from the disk files themselve
 .TP
 .B \-rl, \-\-recover-last <contact_name> \-\-sent|\-\-received
 Stream the kept safety copy of the last delivered payload to standard output: \fB--sent\fP re-emits the exact ciphertext of the last encrypt (the re-transmission source when a message was lost in transit - the same bytes remain valid for the receiver's current key position; never re-encrypt), \fB--received\fP the exact plaintext of the last decrypt (the only remaining decryption once its key bytes are destroyed).  Read-only and repeatable: the copy is never deleted by this command, not even after a fully successful stream - only the next operation in the same direction removes it, when delivery is confirmed (interactive yes or \fB-y\fP).  See EXIT STATUS.
+
+.TP
+.B \-\-add-rand-to-vault <size_in_MB>
+Read <size_in_MB> megabytes of randomness from standard input and store it in the keychain's randomness vault (.keychain/_randomness): appended to the end of the existing file if the vault already exists, or created with mode 0600 if it does not.  The bytes are stored exactly as read, with no transformation.  Standard input must be a pipe or a file, with the same terminal-refusal behavior as \fB--new-key-pair\fP.  The vault is not assigned to any contact and, at this point, is not itself consumed or tracked as key material - it exists purely as accumulated storage.  It is still guarded like a contact: an exclusive \fBflock()\fP on .keychain/_randomness.lock serializes concurrent invocations, and the incoming bytes are staged and read-back verified in full before the vault itself is ever touched, so a short read from stdin leaves it unchanged rather than partially appended.  On success, prints OK followed by a blank line and a summary of how much was just added and the vault's new running total, both in megabytes and exact bytes.  Example: cat /dev/urandom | otp --add-rand-to-vault 100
 
 .SH USAGE
 

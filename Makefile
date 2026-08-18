@@ -43,6 +43,7 @@ build:
 	@bash test/truncate.test.sh
 	@bash test/status.test.sh
 	@bash test/recoverlast.test.sh
+	@bash test/randvault.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -86,6 +87,7 @@ musl:
 	@bash test/truncate.test.sh
 	@bash test/status.test.sh
 	@bash test/recoverlast.test.sh
+	@bash test/randvault.test.sh
 	@echo " - Tested!"
 	@echo
 

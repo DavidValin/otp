@@ -299,6 +299,8 @@ int main(int argc, char *argv[])
          "Report a contact's per-direction state, verified from the disk files themselves (the key file's physical size is the authority, never the metadata alone): messages sent/received, key bytes remaining, metadata consistency, whether an interrupted run left a committed message the next operation will redeliver instead of processing new input, and whether the last sent/received message still awaits delivery confirmation. --porcelain prints stable key=value lines for scripts. Strictly read-only. Exit codes: 0 clean and ready, 4 redelivery pending, 5 delivery confirmation outstanding, 6 key material rolled back (re-key the contact), 1 error."},
         {"--recover-last <name> --sent|--received (or -rl)",
          "Stream the kept safety copy of the last delivered payload to stdout: --sent re-emits the exact ciphertext of the last encrypt (for re-transmission), --received the exact plaintext of the last decrypt (for re-delivery to an application). Read-only and repeatable: the copy is never deleted by this command - only the next confirmed operation in that direction removes it. Exit codes: 0 copy streamed, 2 no copy exists (nothing awaits confirmation), 1 error."},
+        {"--add-rand-to-vault <size_in_MB>",
+         "Read <size_in_MB> megabytes of randomness from stdin and store it in the keychain's randomness vault (.keychain/_randomness): appended if the vault already exists, created with mode 0600 if not. The bytes are stored exactly as read, byte for byte. Not tied to any contact - the vault is not itself consumed or tracked as key material, just accumulated storage. On success reports OK followed by how much was just added and the vault's new running total."},
     };
     /* Banner: the title as a black-on-white chip, one space of padding
      * inside the highlight on each side, flush against the left edge.
@@ -308,7 +310,7 @@ int main(int argc, char *argv[])
       printf("%s otp v1.4.0 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
     else
       puts("otp v1.4.0 - One Time Pad toolkit");
-    otp_print_wrapped("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:");
+    otp_print_wrapped("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n  \n  Add randomness to the vault:\n    cat /dev/urandom | otp --add-rand-to-vault <size_in_MB>\n    Appends (or creates) .keychain/_randomness with that much randomness, stored exactly as read.\n\nKeychain Commands:");
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
     {
       printf("  %s%s%s\n", hl, cmds[i][0], rs);
@@ -515,6 +517,63 @@ int main(int argc, char *argv[])
     if (result == KEYCHAIN_REDELIVERED)
       return KEYCHAIN_REDELIVERED;
     return result == KEYCHAIN_OK ? 0 : 1;
+  }
+
+  /* **************************************************************************
+   *  Handles --add-rand-to-vault command                                     *
+   * *********************************************************************** */
+
+  if (argc >= 3 && strcmp(argv[1], "--add-rand-to-vault") == 0)
+  {
+    /* Same rationale as --new-key-pair below: randomness is read from
+     * stdin, so a terminal there means no randomness source was piped
+     * in - refused before the vault file is even opened. */
+    if (otp_stdin_is_tty())
+    {
+      fprintf(stderr,
+              "Error: --add-rand-to-vault reads randomness from stdin, but stdin is a "
+              "terminal.\nPipe in a randomness source, e.g.:\n"
+              "  cat /dev/urandom | otp --add-rand-to-vault %s\n",
+              argv[2]);
+      return 1;
+    }
+
+    const char *size_str = argv[2];
+    char *endptr = NULL;
+    double size_mb = strtod(size_str, &endptr);
+    if (endptr == size_str || size_mb <= 0)
+    {
+      fprintf(stderr, "Invalid size %s MB\n", size_str);
+      return 1;
+    }
+    /* Range-check before converting: a size_mb larger than size_t can
+     * represent makes the conversion below undefined, not merely wrong. */
+    if (size_mb > (double)(SIZE_MAX / (1024 * 1024)))
+    {
+      fprintf(stderr, "Size too large: %s MB\n", size_str);
+      return 1;
+    }
+    size_t size = (size_t)(size_mb * 1024 * 1024 + 0.5); // round
+    if (size == 0)
+    {
+      fprintf(stderr, "Size too small: %s MB results in 0 bytes\n", size_str);
+      return 1;
+    }
+
+    size_t total = 0;
+    if (add_rand_to_vault(size, &total) != 0)
+      return 1;
+
+    /* OK in green, the summary in yellow (piped output stays plain text,
+     * like every other colored report here) - the amount just added and
+     * the vault's new total, both in MB (to match the command's own
+     * <size_in_MB> unit) and exact bytes (to match the byte-exactness
+     * the vault itself guarantees). */
+    int tty_out = otp_stdout_is_tty();
+    printf("%sOK%s\n\n", tty_out ? OTP_GREEN : "", tty_out ? OTP_RESET : "");
+    printf("%sAdded: %s MB (%zu bytes)%s\n", tty_out ? OTP_YELLOW : "", size_str, size, tty_out ? OTP_RESET : "");
+    printf("%sVault total: %.2f MB (%zu bytes)%s\n", tty_out ? OTP_YELLOW : "", (double)total / (1024.0 * 1024.0), total, tty_out ? OTP_RESET : "");
+    return 0;
   }
 
   /* **************************************************************************

@@ -91,6 +91,212 @@ int get_keychain_dir(char *dir_path, size_t dir_path_size)
   return 0;
 }
 
+// The randomness vault: <keychain_dir>/_randomness, a single sequential
+// randomness stream that --add-rand-to-vault appends pre-generated
+// randomness to. It belongs to no contact and is not itself consumed or
+// tracked the way a contact's key material is - at this point it exists
+// purely as accumulated storage. It still shares two protections with
+// every contact: the same per-name flock() (<keychain_dir>/_randomness.lock)
+// serializes concurrent appends, and new content is staged and read-back
+// verified before the vault is ever touched.
+#define RAND_VAULT_NAME "_randomness"
+#define RAND_VAULT_CHUNK (1024 * 1024)
+
+// Append `size` bytes of randomness, read from stdin, to the vault -
+// creating it (mode 0600, matching every other secret this tool writes)
+// the first time this is called, appending on every call after.
+//
+// Two failure modes this guards against, beyond a plain O_APPEND write:
+//
+// 1. Concurrent invocations. Two processes appending at once could
+//    otherwise interleave their writes - flock()'d exclusively via the
+//    same per-name lock contact operations use (contact_lock_acquire),
+//    just keyed by the vault's own name instead of a contact's.
+//
+// 2. A short read from stdin (the randomness source died, was piped from
+//    a file smaller than claimed, or was killed mid-stream). The incoming
+//    bytes are staged into a tmp file and read-back verified via
+//    commit_stage_close_verified() *before* the vault is touched at all -
+//    so a caller who never supplies the full `size` bytes leaves the
+//    vault exactly as it was, never partially appended.
+//
+// Once the new bytes are confirmed durable and complete, folding them
+// into the vault is a plain O_APPEND copy - cheap (proportional to the
+// new data, not the vault's total size) and, unlike the truncate-and-
+// rewrite treatment key files get, safe to do in place: appending can
+// only ever extend the file, never rewrite bytes already durable there,
+// so even a failure partway through this last step cannot corrupt
+// pre-existing vault content - it can at worst leave the new addition
+// incomplete, which a later call simply appends past.
+//
+// On success, *out_total_size (if non-NULL) is set to the vault's total
+// size after this call: for a brand-new vault, the exact count of bytes
+// just staged; for an existing one, a fresh stat() of the vault itself
+// taken right after the append, still under the lock this call holds
+// throughout - so nothing else could have changed it in between.
+int add_rand_to_vault(size_t size, size_t *out_total_size)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return -1;
+
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, RAND_VAULT_NAME) != 0)
+    return -1;
+
+  char vault_path[600];
+  char stage_tmp[600];
+  if (snprintf(vault_path, sizeof(vault_path), "%s%c%s", keychain_dir, PATH_SEPARATOR,
+               RAND_VAULT_NAME) >= (int)sizeof(vault_path) ||
+      snprintf(stage_tmp, sizeof(stage_tmp), "%s%c%s.tmp", keychain_dir, PATH_SEPARATOR,
+               RAND_VAULT_NAME) >= (int)sizeof(stage_tmp))
+  {
+    fprintf(stderr, "Error: randomness vault path too long\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  // Stage 1: read and read-back-verify the incoming randomness on its
+  // own, entirely independent of the vault.
+  CommitStage stage;
+  if (commit_stage_open(&stage, stage_tmp) != 0)
+  {
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  unsigned char *buf = malloc(RAND_VAULT_CHUNK);
+  if (!buf)
+  {
+    fprintf(stderr, "Memory allocation failed\n");
+    commit_stage_abort(&stage);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  size_t left = size;
+  while (left > 0)
+  {
+    size_t want = (left < RAND_VAULT_CHUNK) ? left : RAND_VAULT_CHUNK;
+    /* Every requested byte must come from stdin before any of it is
+     * staged: a short read (stdin ended early) must never be padded out
+     * with whatever the buffer already held. */
+    if (fread(buf, 1, want, stdin) != want)
+    {
+      fprintf(stderr, "Error: Expected %zu bytes of randomness on stdin, got less\n", size);
+      free(buf);
+      commit_stage_abort(&stage);
+      contact_lock_release(&lock);
+      return -1;
+    }
+    if (commit_stage_write(&stage, buf, want) != 0)
+    {
+      free(buf);
+      commit_stage_abort(&stage);
+      contact_lock_release(&lock);
+      return -1;
+    }
+    left -= want;
+  }
+  free(buf);
+
+  if (commit_stage_close_verified(&stage) != 0)
+  {
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  // Stage 2: the incoming randomness is now durable and verified on
+  // disk. If the vault doesn't exist yet, the staged file simply
+  // *becomes* it via atomic rename - no copy needed. Otherwise its
+  // verified bytes are streamed onto the end of the existing vault.
+  struct stat vst;
+  int rc;
+  size_t total = 0;
+  if (stat(vault_path, &vst) != 0 && errno == ENOENT)
+  {
+    rc = commit_publish(stage.tmp_path, vault_path);
+    if (rc == 0)
+      total = stage.written; // the staged file *is* the whole new vault
+  }
+  else
+  {
+    int fd = open(vault_path, O_WRONLY | O_CREAT | O_APPEND | O_BINARY_FLAG, 0600);
+    if (fd < 0)
+    {
+      fprintf(stderr, "Error: Cannot open randomness vault '%s': %s\n", vault_path, strerror(errno));
+      rc = -1;
+    }
+    else
+    {
+      FILE *vault = fdopen(fd, "ab");
+      if (!vault)
+      {
+        fprintf(stderr, "Error: Cannot open randomness vault '%s': %s\n", vault_path, strerror(errno));
+        close(fd);
+        rc = -1;
+      }
+      else
+      {
+        FILE *verified = fopen(stage.tmp_path, "rb");
+        if (!verified)
+        {
+          fprintf(stderr, "Error: Cannot reopen staged randomness: %s\n", strerror(errno));
+          rc = -1;
+        }
+        else
+        {
+          rc = 0;
+          unsigned char copybuf[RAND_VAULT_CHUNK];
+          size_t got;
+          while ((got = fread(copybuf, 1, sizeof(copybuf), verified)) > 0)
+          {
+            if (fwrite(copybuf, 1, got, vault) != got)
+            {
+              fprintf(stderr, "Error writing randomness vault '%s': %s\n", vault_path, strerror(errno));
+              rc = -1;
+              break;
+            }
+          }
+          if (rc == 0 && ferror(verified))
+          {
+            fprintf(stderr, "Error: Failed reading staged randomness\n");
+            rc = -1;
+          }
+          fclose(verified);
+        }
+        /* fflush()/fsync() report a failed write that fwrite() alone
+         * cannot: a vault silently truncated by a full disk would
+         * otherwise be treated as complete. */
+        if (rc == 0 && (fflush(vault) != 0 || otp_fsync(fileno(vault)) != 0))
+        {
+          fprintf(stderr, "Error: Failed to store randomness vault '%s': %s\n", vault_path, strerror(errno));
+          rc = -1;
+        }
+        fclose(vault);
+        /* A fresh stat() of the vault itself, taken under the same lock
+         * held for the whole call (so nothing else could have changed
+         * it meanwhile), is the authority on the final size - more
+         * direct than trusting the pre-append stat() plus the byte
+         * count we meant to add. */
+        if (rc == 0)
+        {
+          struct stat post;
+          if (stat(vault_path, &post) == 0)
+            total = (size_t)post.st_size;
+        }
+      }
+    }
+    commit_discard_path(stage.tmp_path);
+  }
+
+  if (rc == 0 && out_total_size)
+    *out_total_size = total;
+
+  contact_lock_release(&lock);
+  return rc;
+}
+
 // Copy a key file into the keychain directory, streaming so that a
 // terabyte-scale key is never held in RAM.
 //

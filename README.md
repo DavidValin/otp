@@ -17,6 +17,7 @@ When using the one time pad algorithm, it is critical to remember to never reuse
 - **Protection against key reuse via disk commit stages:** every message is staged, `fsync`'d and read back verified before anything is published, and the key file is committed *before* the metadata that could otherwise claim it spent early - see [Stages of one encrypt/decrypt operation](#stages-of-one-encryptdecrypt-operation).
 - **Automatic recovery from a mid-operation crash:** the next call on a contact reconciles any leftover pending artifact against the key file and metadata via a deterministic truth table - never a guess - before doing anything else - see [Recovering from a crash](#recovering-from-a-crash).
 - **Recovery of the last message when delivery isn't acknowledged:** the exact bytes last sent or received are kept in `.last_sent`/`.last_received` until the next confirmed operation, and can be re-emitted at any time with `--recover-last` - see [`--recover-last`: re-emitting the kept safety copies](#--recover-last-re-emitting-the-kept-safety-copies).
+- **Randomness vault:** `--add-rand-to-vault <size_in_MB>` stores a sequential randomness stream at `.keychain/_randomness` - created (mode 0600) on first use, appended to on every call after, not tied to any contact.
 
 ## Index
 
@@ -158,6 +159,13 @@ Common operations:
 - **Check if contact exists:** `otp --has-contact <name>` or `otp -hc <name>`
 - **Disk-verified status (for scripts/integrations):** `otp --status <name> [--porcelain]` or `otp -st <name>` - see [External Integrations](#external-integrations)
 - **Re-emit the last payload's kept copy:** `otp --recover-last <name> --sent|--received` or `otp -rl <name> ...`
+- **Add randomness to the vault:** `cat /dev/urandom | otp --add-rand-to-vault <size_in_MB>` - stores that much randomness at `.keychain/_randomness`, appended to if it already exists, created (mode 0600) if not; not assigned to any contact. On success prints `OK`, a blank line, then how much was just added and the vault's new running total:
+  ```
+  OK
+
+  Added: 100 MB (104857600 bytes)
+  Vault total: 340.00 MB (356515840 bytes)
+  ```
 
 #### Keychain Features
 
@@ -207,6 +215,8 @@ During an operation, and after an interrupted one, you may also see:
 | `<contact>_enc.key.tmp`<br>`<contact>_dec.key.tmp` | transient | The post-truncation key file, staged and verified before being renamed over the real one. |
 | `<contact>.meta.tmp` | transient | The metadata file, staged and verified the same way. |
 | `<contact>.last_sent`<br>`<contact>.last_received` | until next confirmed operation | An exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed. `otp` removes it **automatically** - no manual cleanup is ever needed - the moment the next operation in that direction confirms delivery (interactive "yes" or `-y`); if delivery is instead rejected, `otp` offers to recover the copy to a file of your choosing. `--recover-last` streams it to stdout at any time without consuming it. Deleted with the contact. |
+| `_randomness` | permanent | The randomness vault: a single sequential randomness stream, appended to by `--add-rand-to-vault`. Not tied to any contact - unlike everything else above, it is not itself consumed or tracked as key material, just accumulated storage. Guarded by its own `_randomness.lock` (the same per-name `flock()` a contact gets) and never touched until the incoming bytes are staged and read-back verified in full, so a short read from stdin or a concurrent invocation can't corrupt or interleave it. |
+| `_randomness.lock` | permanent | Empty file backing the vault's `flock()`, exactly like `<contact>.lock`. |
 
 `<dir>` is `enc` or `dec`. Every transient file is either published by an atomic `rename()` or cleaned up; none of them is ever the only copy of anything that matters. Seeing one after a crash is normal - the next `otp -c <contact>` call reconciles it.
 
