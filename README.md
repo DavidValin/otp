@@ -8,8 +8,19 @@ This program allows you to operate using one time pad cipher and a keychain. It 
 
 When using the one time pad algorithm, it is critical to remember to never reuse the part of the key that was used. The keychain enforces this automatically: every encrypt/decrypt consumes its key bytes and physically destroys them, so a spent key range can never serve a second message.
 
+## Features
+
+- **Keychain:** stores key material for any number of contacts under `.keychain/`, one self-contained set of files per contact - see [Keychain Management Commands](#keychain-management-commands).
+- **Automatic contact metadata handling:** sequence numbers, key offsets and timestamps are tracked per contact in `<contact>.meta`, read fresh under lock and self-healed against the key file's own size rather than trusted blindly - see [Per-contact metadata files](#per-contact-metadata-files) and [Self-healing metadata](#self-healing-metadata).
+- **Simultaneous send/receive, one key pair per contact:** an `_enc.key` and a separate `_dec.key` per contact mean the two directions consume independent key ranges and never block on each other - see [Two keys per contact, mirrored between the two parties](#two-keys-per-contact-mirrored-between-the-two-parties).
+- **Protection against concurrent access to the same contact:** an exclusive per-contact `flock()` on `<contact>.lock` serializes any two processes that touch the same contact at once, so they can never draw from the same key range - see [Per-contact locking](#per-contact-locking).
+- **Protection against key reuse via disk commit stages:** every message is staged, `fsync`'d and read back verified before anything is published, and the key file is committed *before* the metadata that could otherwise claim it spent early - see [Stages of one encrypt/decrypt operation](#stages-of-one-encryptdecrypt-operation).
+- **Automatic recovery from a mid-operation crash:** the next call on a contact reconciles any leftover pending artifact against the key file and metadata via a deterministic truth table - never a guess - before doing anything else - see [Recovering from a crash](#recovering-from-a-crash).
+- **Recovery of the last message when delivery isn't acknowledged:** the exact bytes last sent or received are kept in `.last_sent`/`.last_received` until the next confirmed operation, and can be re-emitted at any time with `--recover-last` - see [`--recover-last`: re-emitting the kept safety copies](#--recover-last-re-emitting-the-kept-safety-copies).
+
 ## Index
 
+- [Features](#features)
 - [Installation](#installation)
 - [New key pair generation](#new-key-pair-generation)
   - [True Random key generator](#true-random-key-generator)
