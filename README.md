@@ -56,6 +56,9 @@ When using the one time pad algorithm, it is critical to remember to never reuse
   - [`--recover-last`: re-emitting the kept safety copies](#--recover-last-re-emitting-the-kept-safety-copies)
   - [The integration flow](#the-integration-flow)
   - [Why this flow preserves the one-time-pad guarantees](#why-this-flow-preserves-the-one-time-pad-guarantees)
+- [Testing the implementation](#testing-the-implementation)
+  - [Running the automated tests](#running-the-automated-tests)
+  - [Debugging logic in gdb](#debugging-logic-in-gdb)
 
 ## Installation
 
@@ -658,3 +661,115 @@ Requirement 2 of the pad - every key byte used exactly once, ever ([One Time Pad
 - **The confirmation gate keeps its meaning.** `-y` remains an assertion the *client* makes from its own ack state, exactly as the interactive "yes" is the operator's. `--status` merely tells the client that the assertion is due (`ack_outstanding=1`); it never makes it. A client that follows the flow - ack before `-y`, `-y` before new key is spent - gives the gate strictly better information than an interactive user guessing from memory.
 
 And the crash-safety picture is provably unchanged: `--status` and `--recover-last` are asserted read-only by the test suite (byte-identical keychain before and after, pending artifacts left untouched), the classification they report is the same code recovery executes, and every pre-existing crash-window, locking, metadata and confirmation test passes unmodified.
+
+## Testing the implementation
+
+### Running the automated tests
+
+The suite lives in `test/`, one `.sh` script per area (key generation, keychain management, commit staging, locking, metadata, delivery confirmation, last-copy recovery, truncation handling, `--status`, `--recover-last`). Every script talks to a real `./bin/otp` binary over real files - there are no mocks of the disk or the keychain.
+
+```
+make build
+```
+Builds `bin/otp` and then runs every test script in sequence via `sh`, stopping at the first failure.
+
+A single script can also be run directly once the binary is built, e.g.:
+
+```
+make build
+bash test/otp.test.sh
+```
+
+`test/report.sh` runs the same scripts (continuing past failures so the run is always complete) and autogenerates `test-report.html` in the current directory: one expandable, colored PASS/FAIL section per script, with its captured output and its own source alongside. It's regenerated fresh on each run, so it always reflects the most recent results, never a stale copy:
+
+```
+make build
+sh test/report.sh
+```
+
+`test-report.html` also ships inside each release's `.tar.gz` alongside the `otp` binary and the man page, so every release carries the full PASS/FAIL report it was built and tested against.
+
+### Debugging logic in gdb
+
+For anything the test output alone doesn't explain, stepping through the real C code in `gdb` is the fastest way to see what a given run actually did with the key material.
+
+**Compile with debug symbols.** The release build in the `Makefile` uses `-O2`, which reorders and inlines code enough to make single-stepping confusing. Build a separate debug binary instead, straight from the sources `make build` compiles:
+
+```
+gcc -g -O0 -Wall -D_FILE_OFFSET_BITS=64 -o bin/otp-debug src/cli.c src/keychain.c src/cipher.c src/commit.c
+```
+
+Run `gdb` against `bin/otp-debug` from the repo root so relative paths (`.keychain/`, key directories) resolve the way they would for a normal `otp` invocation.
+
+#### Example: key generation
+
+`-nk`/`--new-key-pair` is handled inline in `main()` (`src/cli.c`), which streams the pad out to disk through `keypair_stream_pad()`. Break there to watch each chunk get written and `fsync`'d:
+
+```
+$ gdb --args bin/otp-debug --new-key-pair 1 alice bob
+(gdb) break keypair_stream_pad
+(gdb) run < /dev/urandom
+Breakpoint 1, keypair_stream_pad (buf=..., size=1048576, ...) at src/cli.c:226
+226       size_t left = size;
+(gdb) next
+(gdb) print size
+(gdb) continue
+```
+
+Stepping through `keypair_stream_pad()` shows the read-from-stdin / write-to-file loop and the spinner tick that reports progress; `next`-ing past the loop a few times and inspecting `left` shows the pad size counting down to zero across the two `_keys/` directories it writes (`alice_keys/`, `bob_keys/`).
+
+#### Example: encryption / decryption
+
+Both directions run through `src/cipher.c`. Set up a contact first so there is key material to consume:
+
+```
+$ cat /dev/urandom | bin/otp-debug --new-key-pair 1 alice bob
+$ bin/otp-debug -ac alice alice_keys/encryption_for_bob.key alice_keys/decryption_from_bob.key
+```
+
+The XOR itself is one step in a longer pipeline - keychain lookup and locking, crash reconciliation, commit staging, atomic publish, key truncation, then metadata commit - covered end to end in [Crash-safe key consumption](#crash-safe-key-consumption). Breaking on each stage in order shows the whole thing happening, not just the cipher.
+
+**Encrypt** - `encrypt_with_contact()` (`src/cipher.c:1024`) does the keychain part, then hands off to `encrypt_with_contact_locked()` (`src/cipher.c:719`) for reconciliation, staging and commit:
+
+```
+$ echo "hello bob" | gdb --args bin/otp-debug -c alice --encrypt
+(gdb) break encrypt_with_contact
+(gdb) break contact_lock_acquire
+(gdb) break commit_reconcile
+(gdb) break commit_stage_open
+(gdb) break cipher.c:894
+(gdb) break commit_stage_close_verified
+(gdb) break commit_publish
+(gdb) break truncate_key_file
+(gdb) break save_contact_meta
+(gdb) run
+```
+
+Stepping through with repeated `continue` hits each breakpoint in the order the code actually runs them:
+
+1. `encrypt_with_contact` - `print contact_name`, `next` past `find_contact()` and `get_keychain_dir()` to see `c` and `keychain_dir` resolved from the keychain on disk.
+2. `contact_lock_acquire` - the per-contact `flock()` on `<contact>.lock` that serializes this run against any other process touching the same contact (see [Per-contact locking](#per-contact-locking)); `finish` to return into `encrypt_with_contact`, where `load_keychain()` + `find_contact()` reload `c` fresh now that the lock is held.
+3. `commit_reconcile` - runs before anything is spent, to finish or discard any pending artifact an earlier crashed run left behind; `print rec.action` after `finish` shows which of the truth-table outcomes applied (almost always none, on a clean run).
+4. `commit_stage_open` - opens the durable per-process staging file (`<contact>_enc_pending.<pid>.tmp`) that the ciphertext is about to be streamed into; `print stage.tmp_path`.
+5. `cipher.c:894` (`chunk[i] ^= key_chunk[i];`) - the actual cipher, one buffered chunk at a time: `print chunk[i]`, `print key_chunk[i]`, `next`, `print chunk[i]` shows the plaintext byte turning into ciphertext in place.
+6. `commit_stage_close_verified` - `fsync`s the staged file and reads it back to confirm every byte landed correctly before anything is published.
+7. `commit_publish` - atomically renames the verified stage file to its final, key-range-tagged name (`print final_path`); this is the first durably-visible evidence of the message, still independent of key consumption.
+8. `truncate_key_file` - re-stages and republishes the encryption key file itself with the consumed bytes cut off the front; this is the moment the spent key range is physically destroyed.
+9. `save_contact_meta` - commits the updated sequence number, offset and remaining size to `<contact>.meta`, the second and final half of the two-phase commit; `print c->EncryptionKeyOffset` shows the new range start.
+
+`bt` at any of these shows the call stack back to `main()`'s `-c ... --encrypt` handling in `src/cli.c`.
+
+**Decrypt** - the mirror image. `decrypt_with_contact()` (`src/cipher.c:1369`) → `decrypt_with_contact_locked()` (`src/cipher.c:1082`) follow the identical stage order, just against the decryption key: `commit_reconcile` (`src/cipher.c:1093`), `commit_stage_open` (`:1199`), the XOR at `cipher.c:1243`, `commit_stage_close_verified` (`:1282`), `commit_publish` (`:1308`), `truncate_key_file` (`:1319`), `save_contact_meta` (`:1335`):
+
+```
+$ gdb --args bin/otp-debug -c alice --decrypt
+(gdb) break decrypt_with_contact
+(gdb) break commit_reconcile
+(gdb) break cipher.c:1243
+(gdb) break truncate_key_file
+(gdb) break save_contact_meta
+(gdb) run
+```
+(feed it the ciphertext produced above, e.g. by redirecting the earlier run's stdout into this one's stdin)
+
+The same nine-stage shape applies: keychain lookup and lock, reconcile, stage, XOR (`ciphertext ^ key = plaintext` this time), verify, publish, truncate the decryption key, commit metadata - with the same key bytes never read twice in either direction.
