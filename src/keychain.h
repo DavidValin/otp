@@ -79,6 +79,27 @@ int get_keychain_dir(char *dir_path, size_t dir_path_size);
 // On success, *out_total_size (if non-NULL) receives the vault's total
 // size after this call.
 int add_rand_to_vault(size_t size, size_t *out_total_size);
+// Report the vault's current size (0 with no error if it doesn't exist
+// yet). See keychain.c for the -1 error case.
+int get_vault_size(size_t *out_size);
+// Claim `total_bytes` from the front of the vault for a vault-sourced
+// --new-key-pair generation for (part_a, part_b): stage, verify and
+// publish them to a pending artifact, then truncate the vault - in that
+// order, so the claim is durable before the vault is touched. On success
+// *out_path names the artifact (holding exactly total_bytes verified
+// bytes, ready to stream key material from) and the vault is already
+// reduced.
+int vault_claim(size_t total_bytes, const char *part_a, const char *part_b,
+                char *out_path, size_t out_path_size);
+// Delete the pending artifact once the key files it fed are fully written.
+void vault_claim_release(const char *pending_path);
+// Look for a leftover pending artifact from an interrupted vault-sourced
+// --new-key-pair run: 1 (with *out_path set) if one matches (part_a,
+// part_b) and should be delivered instead of claiming fresh vault bytes,
+// 0 if none exists, -1 if one exists for other names (must be resolved
+// before any new vault claim).
+int vault_claim_recover(const char *part_a, const char *part_b,
+                        char *out_path, size_t out_path_size);
 // Persist one contact's metadata atomically and verified.
 int save_contact_meta(const char *keychain_dir, Contact *c);
 // Record a key file's head in the spent-heads registry; direction is

@@ -96,16 +96,20 @@ echo "     - ${GREEN}PASS${NC} - key pair is symetric"
 echo ""
 
 # -----------------------------------------------------------------------------
-#  test key pair generation refuses a terminal stdin
+#  test key pair generation refuses a terminal stdin when no randomness
+#  vault is available to fall back to
 # -----------------------------------------------------------------------------
 # Run --new-key-pair with stdin attached to a pseudo-terminal (via script(1))
-# instead of a pipe: it must refuse immediately - before creating any
-# directory or file - rather than block waiting for typed key material.
-# script's own stdin is /dev/null so that even a regression (no refusal)
-# ends with a read error instead of hanging the test suite.
+# instead of a pipe: with no .keychain/_randomness vault around to offer
+# instead, it must refuse immediately - before creating any directory or
+# file - rather than block waiting for typed key material. (Falling back to
+# a sufficiently large vault instead of refusing is covered separately in
+# randvault.test.sh.) script's own stdin is /dev/null so that even a
+# regression (no refusal) ends with a read error instead of hanging the
+# test suite.
 echo "   - Key generation with terminal stdin"
 
-rm -rf ttya_keys ttyb_keys
+rm -rf ttya_keys ttyb_keys .keychain
 TTY_TESTED=""
 if script --version 2>/dev/null | grep -q util-linux; then
   # util-linux script (Linux): -c runs the command, -e keeps its exit code
@@ -120,8 +124,8 @@ fi
 if [ -z "$TTY_TESTED" ]; then
   echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
 else
-  if printf '%s' "$TTY_OUT" | grep -q "stdin is a terminal"; then
-    echo "     - ${GREEN}PASS${NC} - expected to read random key from pipe but no pipe was provided"
+  if printf '%s' "$TTY_OUT" | grep -q "no randomness vault"; then
+    echo "     - ${GREEN}PASS${NC} - expected to read random key from pipe but no pipe (or vault) was provided"
   else
     echo "     ! ${RED}FAIL${NC} - expected a refusal when stdin is a terminal, got: $TTY_OUT"
     exit 1

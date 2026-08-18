@@ -629,8 +629,8 @@ static int resync_key_size(const char *direction, const char *contact_name,
 // RAM - on a 1TB key, sending one short message would need a ~1TB
 // allocation.
 #define KEY_STREAM_CHUNK (4 * 1024 * 1024)
-static int truncate_key_file(const char *direction, const char *key_path,
-                             size_t consumed, size_t remaining_size)
+int truncate_key_file(const char *direction, const char *key_path,
+                      size_t consumed, size_t remaining_size)
 {
   FILE *keyfile = fopen(key_path, "rb");
   if (!keyfile || otp_fseek(keyfile, consumed) != 0)

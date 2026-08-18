@@ -297,6 +297,409 @@ int add_rand_to_vault(size_t size, size_t *out_total_size)
   return rc;
 }
 
+// Report the randomness vault's current size, without touching it.
+// Returns 0 with *out_size set to 0 when no vault exists yet (never an
+// error - the vault is optional, unlike a contact's key files), 0 with
+// *out_size set to its byte length when it does, -1 on a real stat
+// failure (permissions, I/O error).
+int get_vault_size(size_t *out_size)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return -1;
+
+  char vault_path[600];
+  if (snprintf(vault_path, sizeof(vault_path), "%s%c%s", keychain_dir, PATH_SEPARATOR,
+               RAND_VAULT_NAME) >= (int)sizeof(vault_path))
+  {
+    fprintf(stderr, "Error: randomness vault path too long\n");
+    return -1;
+  }
+
+  struct stat st;
+  if (stat(vault_path, &st) != 0)
+  {
+    if (errno == ENOENT)
+    {
+      if (out_size)
+        *out_size = 0;
+      return 0;
+    }
+    fprintf(stderr, "Error: Cannot stat randomness vault '%s': %s\n", vault_path, strerror(errno));
+    return -1;
+  }
+  if (out_size)
+    *out_size = (size_t)st.st_size;
+  return 0;
+}
+
+// --new-key-pair, when run with no piped stdin, can draw its randomness
+// from the vault instead of refusing outright. vault_claim() /
+// vault_claim_release() / vault_claim_recover() below let it do so while
+// respecting exactly the same commit discipline a contact's key file gets
+// on every encrypt/decrypt: the bytes about to be consumed are staged and
+// verified into a durable, named artifact *before* the vault is touched at
+// all (commit_stage_open/write/close_verified + commit_publish, the same
+// primitives add_rand_to_vault() above uses), the vault is only then
+// physically shrunk (truncate_key_file(), the very function that trims a
+// contact's key file after each message - not a reimplementation of it),
+// and the artifact is deleted only once the key files it fed are fully
+// written. A crash at any point leaves a decisive, recoverable state: if
+// it lands before the artifact is published the vault is simply untouched
+// and nothing was ever claimed; if it lands after, the claimed bytes exist
+// durably in exactly one place (either still in the vault, or already
+// published to the artifact) and vault_claim_recover() finds that artifact
+// on the next run instead of a fresh claim silently drawing the same
+// randomness twice.
+#define VAULT_PENDING_PREFIX "_randomness_pending_"
+
+static int vault_pending_name(char *out, size_t out_size, const char *part_a, const char *part_b)
+{
+  return snprintf(out, out_size, VAULT_PENDING_PREFIX "%s_%s.bin", part_a, part_b) >= (int)out_size ? -1 : 0;
+}
+
+// Claim `total_bytes` from the front of the vault for the key pair being
+// generated for (part_a, part_b): stage and verify them into a pending
+// artifact, publish it, then truncate the vault to remove them - in that
+// order, so the claim is durable before the vault ever shrinks. On
+// success *out_path names the artifact (now holding exactly `total_bytes`
+// verified bytes) and the vault is already reduced; the caller streams the
+// key pair from *out_path exactly as it would have from stdin, then calls
+// vault_claim_release() once every key file is safely written. On failure
+// the vault is left exactly as it was (or, if the failure happens to land
+// during the truncate step itself, already-published artifact still holds
+// every claimed byte for a later vault_claim_recover() to pick up - see
+// above).
+int vault_claim(size_t total_bytes, const char *part_a, const char *part_b,
+                char *out_path, size_t out_path_size)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return -1;
+
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, RAND_VAULT_NAME) != 0)
+    return -1;
+
+  char vault_path[600], pending_name[300], pending_path[600], stage_tmp[600];
+  if (snprintf(vault_path, sizeof(vault_path), "%s%c%s", keychain_dir, PATH_SEPARATOR,
+               RAND_VAULT_NAME) >= (int)sizeof(vault_path) ||
+      vault_pending_name(pending_name, sizeof(pending_name), part_a, part_b) != 0 ||
+      snprintf(pending_path, sizeof(pending_path), "%s%c%s", keychain_dir, PATH_SEPARATOR,
+               pending_name) >= (int)sizeof(pending_path) ||
+      snprintf(stage_tmp, sizeof(stage_tmp), "%s.tmp", pending_path) >= (int)sizeof(stage_tmp))
+  {
+    fprintf(stderr, "Error: vault claim path too long\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  // Re-check under the lock: the caller's earlier size check is only
+  // advisory (a concurrent claim could have shrunk the vault meanwhile).
+  struct stat vst;
+  if (stat(vault_path, &vst) != 0)
+  {
+    fprintf(stderr, "Error: Cannot stat randomness vault '%s': %s\n", vault_path, strerror(errno));
+    contact_lock_release(&lock);
+    return -1;
+  }
+  size_t vault_size = (size_t)vst.st_size;
+  if (vault_size < total_bytes)
+  {
+    fprintf(stderr,
+            "Error: randomness vault only holds %zu bytes now, less than the %zu needed\n",
+            vault_size, total_bytes);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  FILE *vf = fopen(vault_path, "rb");
+  if (!vf)
+  {
+    fprintf(stderr, "Error: Cannot open randomness vault '%s': %s\n", vault_path, strerror(errno));
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  CommitStage stage;
+  if (commit_stage_open(&stage, stage_tmp) != 0)
+  {
+    fclose(vf);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  unsigned char *buf = malloc(RAND_VAULT_CHUNK);
+  if (!buf)
+  {
+    fprintf(stderr, "Memory allocation failed\n");
+    fclose(vf);
+    commit_stage_abort(&stage);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  size_t left = total_bytes;
+  while (left > 0)
+  {
+    size_t want = (left < RAND_VAULT_CHUNK) ? left : RAND_VAULT_CHUNK;
+    size_t got = fread(buf, 1, want, vf);
+    if (got != want)
+    {
+      fprintf(stderr, "Error: Failed to read randomness vault\n");
+      free(buf);
+      fclose(vf);
+      commit_stage_abort(&stage);
+      contact_lock_release(&lock);
+      return -1;
+    }
+    if (commit_stage_write(&stage, buf, got) != 0)
+    {
+      free(buf);
+      fclose(vf);
+      commit_stage_abort(&stage);
+      contact_lock_release(&lock);
+      return -1;
+    }
+    left -= got;
+  }
+  free(buf);
+  fclose(vf);
+
+  if (commit_stage_close_verified(&stage) != 0)
+  {
+    contact_lock_release(&lock);
+    return -1;
+  }
+  if (commit_publish(stage.tmp_path, pending_path) != 0)
+  {
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  // The claimed bytes are now durable at pending_path, independent of the
+  // vault - safe to shrink the vault itself, via the same truncate
+  // primitive a contact's key file gets after every message.
+  if (truncate_key_file("randomness vault", vault_path, total_bytes, vault_size - total_bytes) != 0)
+  {
+    // The vault is either untouched or already fully truncated (truncate_
+    // key_file's own publish step is atomic) - either way no bytes were
+    // lost or duplicated, and pending_path still holds the claimed bytes
+    // for vault_claim_recover() to find on a later run.
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  if (snprintf(out_path, out_path_size, "%s", pending_path) >= (int)out_path_size)
+  {
+    fprintf(stderr, "Error: vault claim path too long\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  contact_lock_release(&lock);
+  return 0;
+}
+
+// Delete the pending artifact once every key file it fed has been fully
+// written and closed - the vault-claim equivalent of a contact's pending
+// artifact being removed once its message is delivered.
+void vault_claim_release(const char *pending_path)
+{
+  commit_discard_path(pending_path);
+}
+
+// Finish an interrupted vault_claim() truncation: if the vault's front
+// bytes are still byte-identical to `pending_path`'s full content (i.e.
+// the earlier run crashed after publishing the artifact but before the
+// truncate's atomic rename completed), truncate them off now; otherwise
+// the truncation already happened before the crash, and this is a no-op.
+// Runs under the vault's own lock throughout, so it can never race a
+// concurrent claim.
+static int vault_claim_finish_truncate(const char *pending_path)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return -1;
+
+  ContactLock lock;
+  if (contact_lock_acquire(&lock, keychain_dir, RAND_VAULT_NAME) != 0)
+    return -1;
+
+  char vault_path[600];
+  if (snprintf(vault_path, sizeof(vault_path), "%s%c%s", keychain_dir, PATH_SEPARATOR,
+               RAND_VAULT_NAME) >= (int)sizeof(vault_path))
+  {
+    fprintf(stderr, "Error: randomness vault path too long\n");
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  unsigned long long pending_size_64;
+  if (otp_file_size(pending_path, &pending_size_64) != 0)
+  {
+    fprintf(stderr, "Error: Cannot stat pending vault claim '%s': %s\n", pending_path, strerror(errno));
+    contact_lock_release(&lock);
+    return -1;
+  }
+  size_t pending_size;
+  if (otp_size_to_size_t(pending_size_64, &pending_size) != 0)
+  {
+    fprintf(stderr, "Error: pending vault claim '%s' is too large for this build\n", pending_path);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  struct stat vst;
+  if (stat(vault_path, &vst) != 0)
+  {
+    /* No vault, or unreadable: either way there is nothing left to
+     * truncate, so the artifact's claim is already fully reflected. */
+    contact_lock_release(&lock);
+    return 0;
+  }
+  size_t vault_size = (size_t)vst.st_size;
+  if (vault_size < pending_size)
+  {
+    contact_lock_release(&lock); /* too short to still hold a copy - already truncated */
+    return 0;
+  }
+
+  FILE *vf = fopen(vault_path, "rb");
+  FILE *pf = fopen(pending_path, "rb");
+  if (!vf || !pf)
+  {
+    fprintf(stderr, "Error: Cannot reopen vault or pending claim for comparison: %s\n", strerror(errno));
+    if (vf)
+      fclose(vf);
+    if (pf)
+      fclose(pf);
+    contact_lock_release(&lock);
+    return -1;
+  }
+
+  unsigned char vbuf[RAND_VAULT_CHUNK], pbuf[RAND_VAULT_CHUNK];
+  size_t left = pending_size;
+  int identical = 1;
+  while (left > 0 && identical)
+  {
+    size_t want = (left < RAND_VAULT_CHUNK) ? left : RAND_VAULT_CHUNK;
+    size_t vgot = fread(vbuf, 1, want, vf);
+    size_t pgot = fread(pbuf, 1, want, pf);
+    if (vgot != want || pgot != want || memcmp(vbuf, pbuf, want) != 0)
+      identical = 0;
+    left -= want;
+  }
+  fclose(vf);
+  fclose(pf);
+
+  if (!identical)
+  {
+    contact_lock_release(&lock); /* front no longer matches - already truncated */
+    return 0;
+  }
+
+  int rc = truncate_key_file("randomness vault", vault_path, pending_size, vault_size - pending_size);
+  contact_lock_release(&lock);
+  return rc;
+}
+
+// Look for a leftover pending artifact from an interrupted vault-sourced
+// --new-key-pair run.
+//
+// Returns 1 with *out_path set when one matching (part_a, part_b) exists:
+// the vault was already durably (and, per vault_claim()'s ordering,
+// irreversibly) charged for this exact pair, so the caller should
+// regenerate the key files straight from *out_path instead of prompting
+// or touching the vault again - re-claiming would draw fresh bytes for
+// keys that were already paid for.
+// Returns 0 when none exists - safe to proceed with a normal vault check.
+// Returns -1 when a pending artifact exists for OTHER names: distinct
+// randomness was already spent from the vault and is sitting undelivered:
+// refusing to silently ignore it is the same defensive stance
+// commit_reconcile() takes on an unexpected extra artifact, since either
+// discarding it (permanently losing that randomness) or ignoring it
+// (leaving spent-but-undelivered bytes with no way back to them) needs the
+// operator to decide, not this call.
+int vault_claim_recover(const char *part_a, const char *part_b,
+                        char *out_path, size_t out_path_size)
+{
+  char keychain_dir[512];
+  if (get_keychain_dir(keychain_dir, sizeof(keychain_dir)) != 0)
+    return -1;
+
+  DIR *d = opendir(keychain_dir);
+  if (!d)
+    return 0; /* no keychain dir yet - nothing pending */
+
+  char match_name[300];
+  if (vault_pending_name(match_name, sizeof(match_name), part_a, part_b) != 0)
+  {
+    closedir(d);
+    fprintf(stderr, "Error: name too long\n");
+    return -1;
+  }
+
+  int found_match = 0, found_other = 0;
+  char other_name[300] = {0};
+  struct dirent *entry;
+  size_t prefix_len = strlen(VAULT_PENDING_PREFIX);
+  while ((entry = readdir(d)) != NULL)
+  {
+    if (strncmp(entry->d_name, VAULT_PENDING_PREFIX, prefix_len) != 0)
+      continue;
+    if (strcmp(entry->d_name, match_name) == 0)
+      found_match = 1;
+    else if (!found_other)
+    {
+      found_other = 1;
+      snprintf(other_name, sizeof(other_name), "%s", entry->d_name);
+    }
+  }
+  closedir(d);
+
+  if (found_match)
+  {
+    if (snprintf(out_path, out_path_size, "%s%c%s", keychain_dir, PATH_SEPARATOR,
+                 match_name) >= (int)out_path_size)
+    {
+      fprintf(stderr, "Error: vault claim path too long\n");
+      return -1;
+    }
+
+    /* vault_claim() publishes this artifact BEFORE truncating the vault,
+     * so a crash between those two steps leaves it here with the vault
+     * still holding its own (untruncated) copy of the very same bytes at
+     * the front. Finish that truncation now, under the same lock, before
+     * handing the artifact back - otherwise those bytes would still be
+     * sitting in the vault, available to be claimed (and reused) a second
+     * time. Whether that finishing step is even still needed is decided
+     * by comparing the vault's current front bytes against the artifact's
+     * exact content: if the truncation already completed before the
+     * crash, the vault's front no longer matches (or the vault is now too
+     * short to hold a copy at all) and nothing further is done. */
+    if (vault_claim_finish_truncate(out_path) != 0)
+      return -1;
+
+    return 1;
+  }
+
+  if (found_other)
+  {
+    fprintf(stderr,
+            "Error: an interrupted vault-sourced --new-key-pair run left randomness already "
+            "claimed from the vault but not yet delivered, at '%s%c%s'.\n"
+            "Rerun --new-key-pair with the exact same size and party names that produced it "
+            "to finish delivering those key files, or remove that file yourself if the "
+            "randomness should be treated as lost (it was already spent from the vault either "
+            "way and cannot be reused).\n",
+            keychain_dir, PATH_SEPARATOR, other_name);
+    return -1;
+  }
+
+  return 0;
+}
+
 // Copy a key file into the keychain directory, streaming so that a
 // terabyte-scale key is never held in RAM.
 //

@@ -76,4 +76,15 @@ int keychain_recover_last(const char *contact_name, int sent, FILE *output);
 // content with it.
 void cipher_discard_last_copies(const char *keychain_dir, const char *contact_name);
 
+// Drop the consumed prefix from `key_path`: stream everything from offset
+// `consumed` onward into a staging file, verify that staged copy by
+// read-back, then atomically publish it over `key_path`. `direction` is
+// used only in error messages. This is the same crash-safe
+// stage/verify/publish primitive encrypt/decrypt use to truncate a
+// contact's key file after each message; shared here so any other caller
+// consuming a prefix of a file (e.g. the randomness vault) truncates it
+// exactly the same way, rather than through a second, divergent code path.
+int truncate_key_file(const char *direction, const char *key_path,
+                      size_t consumed, size_t remaining_size);
+
 #endif // CIPHER_H

@@ -90,7 +90,16 @@ Example (generates 2 key pairs of 1MB length, one pair for each party)
 cat /dev/urandom | otp --new-key-pair 1 alice bob
 ```
 
-The key material is read from **stdin**, so the randomness source must be piped in. Run without a pipe (stdin on a terminal) the command refuses immediately - before creating any directory or file - rather than sit waiting for megabytes of typed input.
+The key material is read from **stdin**, so the randomness source must be piped in. Run without a pipe (stdin on a terminal), the command no longer refuses outright - it checks `.keychain/_randomness`, the randomness vault filled by [`--add-rand-to-vault`](#keychain-management-commands), instead. Generating a pair needs two independent pads of `<size_in_MB>` each, so the vault must hold at least twice that:
+
+- **Vault holds enough** (>= `2 x <size_in_MB>`): prompts `Use randomness vault for key generation? [y/N]`. Answering `y` draws the two pads from the front of the vault - through the exact same crash-safe stage/verify/publish-then-truncate machinery a contact's key file gets consumed by on every encrypt/decrypt (see [Crash-safe key consumption](#crash-safe-key-consumption)), so an interrupted run is always safely resumable on a later retry with the same size and party names, never by silently drawing fresh vault bytes on top. Answering anything else (including just Enter) cancels with `Operation canceled` and leaves the vault untouched.
+- **Vault missing, empty, or holds less than needed**: refuses immediately, the same way a bare terminal always did, and suggests piping in randomness:
+  ```
+  There is no randomness vault size above 1 bit, please provide randomness via stdin
+  Example: cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>
+  ```
+
+Either way, nothing is created until the randomness source (piped stdin or the vault) is settled.
 
 **The roles are inverted between the two parties**. This is the single most important thing to understand about generation, and getting it backwards is the most common way to end up unable to decrypt anything.
 
@@ -217,6 +226,7 @@ During an operation, and after an interrupted one, you may also see:
 | `<contact>.last_sent`<br>`<contact>.last_received` | until next confirmed operation | An exact copy of what the last encrypt (ciphertext) or decrypt (plaintext) wrote to stdout, kept so a forgotten redirect cannot lose a message whose key bytes are already destroyed. `otp` removes it **automatically** - no manual cleanup is ever needed - the moment the next operation in that direction confirms delivery (interactive "yes" or `-y`); if delivery is instead rejected, `otp` offers to recover the copy to a file of your choosing. `--recover-last` streams it to stdout at any time without consuming it. Deleted with the contact. |
 | `_randomness` | permanent | The randomness vault: a single sequential randomness stream, appended to by `--add-rand-to-vault`. Not tied to any contact - unlike everything else above, it is not itself consumed or tracked as key material, just accumulated storage. Guarded by its own `_randomness.lock` (the same per-name `flock()` a contact gets) and never touched until the incoming bytes are staged and read-back verified in full, so a short read from stdin or a concurrent invocation can't corrupt or interleave it. |
 | `_randomness.lock` | permanent | Empty file backing the vault's `flock()`, exactly like `<contact>.lock`. |
+| `_randomness_pending_<part_a>_<part_b>.bin` | transient | A vault-sourced `--new-key-pair`'s claimed randomness (`2 x <size_in_MB>` bytes), staged and read-back verified, then published here *before* the vault is truncated to remove it - the same commit-before-consume ordering a contact's key file gets. Deleted once every key file it fed has been written. If one survives a crash, rerunning `--new-key-pair` with the exact same size and party names finishes the truncation (if it hadn't completed yet) and regenerates the key files from it, instead of drawing fresh vault bytes on top. |
 
 `<dir>` is `enc` or `dec`. Every transient file is either published by an atomic `rename()` or cleaned up; none of them is ever the only copy of anything that matters. Seeing one after a crash is normal - the next `otp -c <contact>` call reconciles it.
 

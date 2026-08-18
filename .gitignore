@@ -4,3 +4,4 @@ bin
 *.enc
 test_*
 test-report.html
+.task-worktrees
