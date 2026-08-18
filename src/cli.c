@@ -143,6 +143,86 @@ static void keypair_spinner_tick(void)
  * regardless of key size, so key pairs can be far larger than RAM (the
  * keychain accepts keys up to 1TB). */
 #define KEYPAIR_CHUNK (1024 * 1024)
+/* Word-wraps help text at OTP_HELP_WIDTH columns so the --help output
+ * stays readable in a standard 80-column terminal. The text is
+ * processed line by line (splitting on the '\n' already embedded in
+ * the help strings, which mark paragraph breaks and list structure);
+ * each source line's leading whitespace is preserved as the indent for
+ * its own wrapped continuation lines, plus two extra spaces, so a
+ * wrapped line reads as a visually indented continuation rather than
+ * a new list item flush against the margin. */
+#define OTP_HELP_WIDTH 70
+static void otp_print_wrapped_indented(const char *text, size_t extra_indent)
+{
+  const char *line = text;
+  while (*line)
+  {
+    const char *nl = strchr(line, '\n');
+    size_t linelen = nl ? (size_t)(nl - line) : strlen(line);
+
+    /* src_indent: leading spaces already in this source line, used as
+     * the wrap indent so list markers ("  " or "    ") line up with
+     * how the string was authored. indent: the printed column the
+     * first word starts at, once extra_indent (e.g. past a tab-stop
+     * command name) is added in. cont_indent: where a wrapped
+     * continuation resumes - two columns deeper, so it reads as a
+     * continuation rather than a sibling list item. */
+    size_t src_indent = 0;
+    while (src_indent < linelen && line[src_indent] == ' ')
+      src_indent++;
+    size_t indent = extra_indent + src_indent;
+    size_t cont_indent = indent + 2;
+
+    size_t pos = src_indent;
+    if (pos < linelen)
+    {
+      for (size_t i = 0; i < indent; i++)
+        putchar(' ');
+    }
+    size_t col = indent;
+    int first_word = 1;
+    while (pos < linelen)
+    {
+      size_t wstart = pos;
+      while (pos < linelen && line[pos] != ' ')
+        pos++;
+      size_t wlen = pos - wstart;
+
+      /* first_word is only true right after printing the line's (or a
+       * wrapped continuation's) indent, so no leading space is due
+       * yet - a word there never needs an extra wrap check. */
+      if (!first_word && col + 1 + wlen > OTP_HELP_WIDTH)
+      {
+        putchar('\n');
+        for (size_t i = 0; i < cont_indent; i++)
+          putchar(' ');
+        col = cont_indent;
+        first_word = 1;
+      }
+      if (!first_word)
+      {
+        putchar(' ');
+        col++;
+      }
+      fwrite(line + wstart, 1, wlen, stdout);
+      col += wlen;
+      first_word = 0;
+
+      while (pos < linelen && line[pos] == ' ')
+        pos++;
+    }
+    putchar('\n');
+
+    if (!nl)
+      break;
+    line = nl + 1;
+  }
+}
+static void otp_print_wrapped(const char *text)
+{
+  otp_print_wrapped_indented(text, 0);
+}
+
 static int keypair_stream_pad(unsigned char *buf, size_t size,
                               FILE *dst1, FILE *dst2, const char *what)
 {
@@ -228,10 +308,13 @@ int main(int argc, char *argv[])
       printf("%s otp v1.4.0 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
     else
       puts("otp v1.4.0 - One Time Pad toolkit");
-    puts("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:");
+    otp_print_wrapped("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n\nKeychain Commands:");
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
-      printf("  %s%s%s\n\t%s\n", hl, cmds[i][0], rs, cmds[i][1]);
-    puts("\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file. --recover-last streams the copy at any time without consuming it.\n\nExternal integration:\n  Programs driving otp need no library: --status answers, from the disk files alone, everything a client must know before its next operation (is a crash-recovery redelivery pending? is the previous message still unconfirmed?), --recover-last re-emits the kept copy for re-transmission or re-delivery, and the -c exit codes (0 processed, 3 redelivered, 1 error) report each operation's outcome. Delivery confirmation stays with the integrating program: pass -y on the next operation once the peer acknowledged the previous message. See the \"External Integrations\" section of README.md for the full send/receive flow.\n");
+    {
+      printf("  %s%s%s\n", hl, cmds[i][0], rs);
+      otp_print_wrapped_indented(cmds[i][1], 4);
+    }
+    otp_print_wrapped("\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file. --recover-last streams the copy at any time without consuming it.\n\nExternal integration:\n  Programs driving otp need no library: --status answers, from the disk files alone, everything a client must know before its next operation (is a crash-recovery redelivery pending? is the previous message still unconfirmed?), --recover-last re-emits the kept copy for re-transmission or re-delivery, and the -c exit codes (0 processed, 3 redelivered, 1 error) report each operation's outcome. Delivery confirmation stays with the integrating program: pass -y on the next operation once the peer acknowledged the previous message. See the \"External Integrations\" section of README.md for the full send/receive flow.\n");
     return 0;
   }
 
