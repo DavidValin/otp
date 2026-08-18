@@ -1,6 +1,6 @@
 /*****************************************************************************\
  *                                                                            *
- *   otp v1.4.0                                                               *
+ *   otp v1.5.0                                                               *
  *                                                                            *
  *    simple but effective one time pad encryption / decryption command       *
  *    that works with stdin/stdout, managing contacts and key material        *
@@ -368,9 +368,9 @@ int main(int argc, char *argv[])
      * Piped output gets the plain line instead. */
     printf("\n\n");
     if (otp_stdout_is_tty())
-      printf("%s otp v1.4.0 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
+      printf("%s otp v1.5.0 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
     else
-      puts("otp v1.4.0 - One Time Pad toolkit");
+      puts("otp v1.5.0 - One Time Pad toolkit");
     otp_print_wrapped("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n    Run with no pipe (stdin a terminal), it offers the randomness vault instead of refusing, when the vault holds enough (2x <size_in_MB>, since a pair draws two independent pads).\n  \n  Add randomness to the vault:\n    cat /dev/urandom | otp --add-rand-to-vault <size_in_MB>\n    Appends (or creates) .keychain/_randomness with that much randomness, stored exactly as read.\n\nKeychain Commands:");
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
     {
