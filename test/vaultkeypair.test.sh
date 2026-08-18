@@ -42,7 +42,13 @@ run_pty() {
     TTY_TESTED=1
   elif [ "$(uname)" = "Darwin" ]; then
     if [ -n "$ans" ]; then
-      TTY_OUT=$(printf '%s\n' "$ans" | script -q vk_tty.log sh -c "./bin/otp $*" 2>&1)
+      # BSD script(1) relays stdin to the child's pty; if the feeder pipe
+      # closes (EOF) the instant the answer is written, a child that isn't
+      # at its read() yet (still loading the keychain, checking the vault
+      # size, etc.) can race that EOF instead of the answer that was
+      # already sent. Holding the pipe open briefly after the write gives
+      # the child time to reach fgets() first.
+      TTY_OUT=$( { printf '%s\n' "$ans"; sleep 0.3; } | script -q vk_tty.log sh -c "./bin/otp $*" 2>&1)
     else
       TTY_OUT=$(script -q /dev/null ./bin/otp $* < /dev/null 2>&1)
     fi
@@ -203,7 +209,8 @@ if script --version 2>/dev/null | grep -q util-linux; then
   CRASH_RC=$?
   CRASH_TESTED=1
 elif [ "$(uname)" = "Darwin" ]; then
-  CRASH_OUT=$(printf 'y\n' | OTP_TEST_CRASH_POINT=during_key_truncate script -q vk_tty2.log sh -c "./bin/otp --new-key-pair 2 vka2 vkb2" 2>&1)
+  # see run_pty() above for why the feeder pipe is held open past the write
+  CRASH_OUT=$( { printf 'y\n'; sleep 0.3; } | OTP_TEST_CRASH_POINT=during_key_truncate script -q vk_tty2.log sh -c "./bin/otp --new-key-pair 2 vka2 vkb2" 2>&1)
   CRASH_RC=$?
   CRASH_TESTED=1
 fi

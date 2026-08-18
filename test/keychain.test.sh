@@ -489,7 +489,7 @@ rm -rf binenc_keys bindec_keys
 echo "     Testing stderr report separation from payload..."
 
 printf 'hola!' | ./bin/otp -c binenc --encrypt -y 2>kc_sep_err >/dev/null
-if [ -s kc_sep_err ] && [ "$(head -c 1 kc_sep_err | wc -l | tr -d ' ')" = "0" ]; then
+if [ -s kc_sep_err ] && [ "$(dd if=kc_sep_err bs=1 count=1 2>/dev/null | wc -l | tr -d ' ')" = "0" ]; then
   echo "     - ${GREEN}PASS${NC} - no leading blank line when stdout is redirected"
 else
   echo "     ! ${RED}FAIL${NC} - stderr report changed for redirected stdout: $(cat kc_sep_err)"
@@ -507,7 +507,7 @@ fi
 
 if [ -z "$TTY_SEP_TESTED" ]; then
   echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
-elif [ "$(head -c 2 kc_sep_tty_err | wc -l | tr -d ' ')" = "2" ] && grep -q "Used 5 bytes" kc_sep_tty_err; then
+elif [ "$(dd if=kc_sep_tty_err bs=1 count=2 2>/dev/null | wc -l | tr -d ' ')" = "2" ] && grep -q "Used 5 bytes" kc_sep_tty_err; then
   echo "     - ${GREEN}PASS${NC} - report opens with a blank line when stdout is a terminal"
 else
   echo "     ! ${RED}FAIL${NC} - expected the stderr report to start with \\n\\n on a terminal: $(cat kc_sep_tty_err 2>/dev/null)"

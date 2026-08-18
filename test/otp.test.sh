@@ -78,17 +78,12 @@ for f in ${PARTA}_keys/encryption_for_${PARTB}.key ${PARTA}_keys/decryption_from
   echo "     - ${GREEN}PASS${NC} - ${f} exists and correct size"
 done
 
-# Verify cross assignment
-encryption_a=$(cat ${PARTA}_keys/encryption_for_${PARTB}.key | base64 | tr -d '\n')
-decryption_a=$(cat ${PARTA}_keys/decryption_from_${PARTB}.key | base64 | tr -d '\n')
-encryption_b=$(cat ${PARTB}_keys/encryption_for_${PARTA}.key | base64 | tr -d '\n')
-decryption_b=$(cat ${PARTB}_keys/decryption_from_${PARTA}.key | base64 | tr -d '\n')
-
-if [ "$encryption_a" != "$decryption_b" ]; then
+# Verify cross assignment (raw byte comparison - no need to encode)
+if ! cmp -s ${PARTA}_keys/encryption_for_${PARTB}.key ${PARTB}_keys/decryption_from_${PARTA}.key; then
   echo "     ! ${RED}FAIL${NC} - ${PARTA}_keys/encryption_for_${PARTB}.key does not match ${PARTB}_keys/decryption_from_${PARTA}.key"
   exit 1
 fi
-if [ "$decryption_a" != "$encryption_b" ]; then
+if ! cmp -s ${PARTA}_keys/decryption_from_${PARTB}.key ${PARTB}_keys/encryption_for_${PARTA}.key; then
   echo "     ! ${RED}FAIL${NC} - ${PARTA}_keys/decryption_from_${PARTB}.key does not match ${PARTB}_keys/encryption_for_${PARTA}.key"
   exit 1
 fi

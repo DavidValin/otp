@@ -243,7 +243,7 @@ rm -f rv_chunk_*
 BLOCK=1048576
 i=1
 for byte in 11 22 33 44 55; do
-  head -c $BLOCK /dev/zero | tr '\0' "$(printf "\\$(printf '%03o' 0x$byte)")" > rv_chunk_$i
+  dd if=/dev/zero bs=$BLOCK count=1 2>/dev/null | tr '\0' "$(printf "\\$(printf '%03o' 0x$byte)")" > rv_chunk_$i
   i=$((i + 1))
 done
 
