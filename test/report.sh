@@ -57,12 +57,23 @@ fi
 # piped into as it is below - so without disabling that, every one of a
 # script's PASS/FAIL lines would sit in sed's buffer and appear all at
 # once when the script exits, defeating the point of streaming them live
-# as each test case actually runs. GNU sed calls that flag -u; BSD/macOS
-# sed has the same effect under -l instead.
-if sed --version >/dev/null 2>&1; then
+# as each test case actually runs.
+#
+# The flag for that is spelled differently across sed implementations -
+# GNU and OpenBSD sed both use -u; FreeBSD, NetBSD, and macOS sed instead
+# use -l, and neither accepts the other's flag - so probe for the one
+# this sed actually supports rather than guessing from the OS. Getting
+# it wrong isn't just cosmetic: sed is the last stage of a pipeline
+# reading a live test script's output below, so an unsupported flag
+# makes it exit immediately, and the resulting broken pipe sends SIGPIPE
+# back through tee to the test script itself before it can finish.
+# Falling back to no flag at all is buffered but still correct.
+if printf '' | sed -u 's/x/x/' >/dev/null 2>&1; then
   SED_UNBUF="-u"
-else
+elif printf '' | sed -l 's/x/x/' >/dev/null 2>&1; then
   SED_UNBUF="-l"
+else
+  SED_UNBUF=""
 fi
 
 # Version as declared in the cli.c banner, so the report can never drift
