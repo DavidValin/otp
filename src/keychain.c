@@ -77,16 +77,19 @@ int get_keychain_dir(char *dir_path, size_t dir_path_size)
   if (snprintf(dir_path, dir_path_size, "%s", KEYCHAIN_DIR_NAME) >= (int)dir_path_size)
     return -1;
 
-  // Create directory if it doesn't exist
-  struct stat st = {0};
-  if (stat(dir_path, &st) == -1)
+  // mkdir() is the atomic check-and-create: two processes can race to
+  // create this directory at once - e.g. concurrent --add-rand-to-vault
+  // invocations hitting an empty working directory, as covered by
+  // randvault.test.sh's "concurrent invocations" case. Only one mkdir()
+  // can win that race; the loser must tolerate EEXIST rather than fail,
+  // since the directory existing is exactly this function's postcondition,
+  // not evidence of an error. Same idiom as the *_keys directories in
+  // cli.c's key-pair generation.
+  if (mkdir(dir_path, 0700) != 0 && errno != EEXIST)
   {
-    if (mkdir(dir_path, 0700) != 0)
-    {
-      fprintf(stderr, "Error: Failed to create keychain directory '%s': %s\n",
-              dir_path, strerror(errno));
-      return -1;
-    }
+    fprintf(stderr, "Error: Failed to create keychain directory '%s': %s\n",
+            dir_path, strerror(errno));
+    return -1;
   }
   return 0;
 }
