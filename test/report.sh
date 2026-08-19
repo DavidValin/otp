@@ -5,7 +5,10 @@
 # section per script with a colored PASS/FAIL badge, the captured output
 # (assertion lines colorized), and the script's own source, indentation
 # preserved. Unlike make, a failing script does not stop the run: every
-# script is executed so the report is always complete.
+# script is executed so the report is always complete - and each script's
+# full captured output is also echoed straight to the console (colorized
+# the same way, when it's a terminal), so the console log is as complete a
+# record of every PASS/FAIL as the HTML report is.
 #
 # Usage: sh test/report.sh  (or `make test`)
 #
@@ -38,6 +41,15 @@ fi
 TESTS="otp keychain commit lock metadata confirm lastcopy truncate status recoverlast randvault vaultkeypair reporthtml"
 ESC_CHAR=$(printf '\033')
 REPO_URL="https://github.com/DavidValin/otp"
+
+# Colors for the console echo of each script's captured output below - same
+# convention every individual test/*.test.sh script uses for its own PASS/
+# FAIL lines (disabled when stdout isn't a terminal, e.g. under `make` or CI).
+if [ -t 1 ]; then
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+else
+  GREEN=; RED=; NC=
+fi
 
 # Version as declared in the cli.c banner, so the report can never drift
 # from the source on a version bump.
@@ -72,6 +84,10 @@ for t in $TESTS; do
   else
     badge=fail; label=FAIL; failed=$((failed+1)); echo "FAILED (exit $rc)"
   fi
+  # The script's own captured output, in full - this is what makes the
+  # console log as complete a record as test-report.html: every assertion
+  # line this script printed, not just the one-line summary above.
+  printf '%s\n' "$clean" | colorize_console
   extra=""
   [ "$f" -gt 0 ] && extra=", $f failed"
 

@@ -33,19 +33,7 @@ build:
 	fi
 	@echo " - Built!"
 	@echo " - Testing..."
-	@bash test/otp.test.sh
-	@bash test/keychain.test.sh
-	@bash test/commit.test.sh
-	@bash test/lock.test.sh
-	@bash test/metadata.test.sh
-	@bash test/confirm.test.sh
-	@bash test/lastcopy.test.sh
-	@bash test/truncate.test.sh
-	@bash test/status.test.sh
-	@bash test/recoverlast.test.sh
-	@bash test/randvault.test.sh
-	@bash test/vaultkeypair.test.sh
-	@bash test/reporthtml.test.sh
+	@sh test/report.sh || { rm -f $(BIN); exit 1; }
 	@echo " - Tested!"
 	@echo
 
@@ -53,10 +41,24 @@ build:
 # script (continuing past failures so the report is complete) and renders
 # test-report.html - colored, expandable per-test results with output and
 # source - in the current directory. Exits non-zero if any script failed.
+#
+# `build` above calls this same script directly (rather than invoking
+# `bash test/*.test.sh` one at a time and stopping at the first failure):
+# every test case must run and land in test-report.html even when some of
+# them fail, so a CI run that fails still has a complete, colored report
+# to inspect instead of a log truncated at the first red line. And on that
+# failure, `build` removes the binary it just compiled: a build whose
+# tests didn't all pass leaves nothing at $(BIN) to install, archive, or
+# upload, not just a non-zero exit code that a careless caller could
+# ignore while the binary sits there looking legitimate.
 test:
 	@sh test/report.sh
 
-install:
+# Depends on `build`, not just the compiled binary, so a failing self-test
+# (any `bash test/*.test.sh` line above returning non-zero) aborts here
+# too - install can never run against a binary that hasn't just passed
+# its own test suite, no matter how this target is invoked.
+install: build
 	@echo
 	@echo " - Installing..."
 	@if [ "$(OS)" = "Windows_NT" ]; then \
@@ -79,19 +81,7 @@ musl:
 	@musl-gcc -static -D_FILE_OFFSET_BITS=64 -o $(BIN) src/cli.c src/keychain.c src/cipher.c src/commit.c
 	@echo " - Built!"
 	@echo " - Testing..."
-	@bash test/otp.test.sh
-	@bash test/keychain.test.sh
-	@bash test/commit.test.sh
-	@bash test/lock.test.sh
-	@bash test/metadata.test.sh
-	@bash test/confirm.test.sh
-	@bash test/lastcopy.test.sh
-	@bash test/truncate.test.sh
-	@bash test/status.test.sh
-	@bash test/recoverlast.test.sh
-	@bash test/randvault.test.sh
-	@bash test/vaultkeypair.test.sh
-	@bash test/reporthtml.test.sh
+	@sh test/report.sh || { rm -f $(BIN); exit 1; }
 	@echo " - Tested!"
 	@echo
 
@@ -148,7 +138,12 @@ riscv64:
 # Needs the matching qemu binary on PATH (package: qemu-user or
 # qemu-user-static). bin/otp is temporarily replaced by a wrapper that
 # routes every ./bin/otp invocation through qemu, and the real binary is
-# put back when the suite finishes, pass or fail.
+# put back when the suite finishes, pass or fail. Every script in the list
+# runs regardless of earlier ones failing (rc only ever latches to 1, the
+# loop never stops early), so a failure never hides whether the rest pass.
+# The real binary is restored either way, but on failure it's then removed
+# entirely - same reasoning as build/musl: a binary whose tests didn't all
+# pass leaves nothing behind to install, archive, or upload.
 test-arm32: arm32
 	@echo " - Testing arm32 binary under qemu..."
 	@QEMU=$$(command -v qemu-arm || command -v qemu-arm-static); \
@@ -158,10 +153,11 @@ test-arm32: arm32
 	chmod +x bin/otp; \
 	rc=0; \
 	for t in otp keychain commit lock metadata confirm truncate; do \
-	  bash test/$$t.test.sh || { rc=1; break; }; \
+	  bash test/$$t.test.sh || rc=1; \
 	done; \
 	mv bin/otp.target bin/otp; \
-	[ $$rc -eq 0 ] && echo " - Tested!"; exit $$rc
+	if [ $$rc -eq 0 ]; then echo " - Tested!"; else rm -f bin/otp; fi; \
+	exit $$rc
 
 test-riscv64: riscv64
 	@echo " - Testing riscv64 binary under qemu..."
@@ -172,12 +168,14 @@ test-riscv64: riscv64
 	chmod +x bin/otp; \
 	rc=0; \
 	for t in otp keychain commit lock metadata confirm truncate; do \
-	  bash test/$$t.test.sh || { rc=1; break; }; \
+	  bash test/$$t.test.sh || rc=1; \
 	done; \
 	mv bin/otp.target bin/otp; \
-	[ $$rc -eq 0 ] && echo " - Tested!"; exit $$rc
+	if [ $$rc -eq 0 ]; then echo " - Tested!"; else rm -f bin/otp; fi; \
+	exit $$rc
 
-install-musl:
+# Same reasoning as `install: build` above, against the musl target instead.
+install-musl: musl
 	@echo
 	@echo " - Installing musl binary..."
 	@mv ./bin/otp /usr/local/bin/otp-musl

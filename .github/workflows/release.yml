@@ -110,9 +110,11 @@ jobs:
       # natively, so bin/otp is temporarily replaced by the same qemu wrapper
       # the Makefile's test-arm32/test-riscv64 targets use. mingw is the one
       # target with no report: its binary is a Windows executable the runner
-      # cannot execute.
+      # cannot execute. always() so a build that fails its tests still gets
+      # a report generated (and, in the next step, uploaded) instead of
+      # leaving this run with no visibility into what failed.
       - name: Generate HTML test report
-        if: matrix.make_target != 'mingw'
+        if: always() && matrix.make_target != 'mingw'
         run: |
           if [ -n "${{ matrix.qemu }}" ]; then
             QEMU=$(command -v ${{ matrix.qemu }} || command -v ${{ matrix.qemu }}-static)
@@ -125,8 +127,11 @@ jobs:
             sh test/report.sh
           fi
 
+      # always() (rather than the default success-only) so this uploads
+      # even when the build above failed - a failing platform's report,
+      # showing exactly which cases went red, is the one you most need.
       - name: Upload test report
-        if: matrix.make_target != 'mingw'
+        if: always() && matrix.make_target != 'mingw'
         uses: actions/upload-artifact@v4
         with:
           name: test-report-${{ matrix.artifact }}
@@ -176,11 +181,13 @@ jobs:
           release: "14.3"
           usesh: true
           prepare: pkg install -y gmake bash
-          run: |
-            gmake CC=cc build
-            sh test/report.sh
+          # `build` runs test/report.sh itself and leaves test-report.html
+          # behind whether it passes or fails, so nothing further is needed
+          # here to get one.
+          run: gmake CC=cc build
 
       - name: Upload test report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-report-otp-x86_64_freebsd
@@ -212,11 +219,13 @@ jobs:
           release: "7.7"
           usesh: true
           prepare: pkg_add gmake bash
-          run: |
-            gmake CC=cc build
-            sh test/report.sh
+          # `build` runs test/report.sh itself and leaves test-report.html
+          # behind whether it passes or fails, so nothing further is needed
+          # here to get one.
+          run: gmake CC=cc build
 
       - name: Upload test report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-report-otp-x86_64_openbsd
@@ -248,11 +257,13 @@ jobs:
           release: "10.1"
           usesh: true
           prepare: /usr/sbin/pkg_add gmake bash
-          run: |
-            gmake CC=cc build
-            sh test/report.sh
+          # `build` runs test/report.sh itself and leaves test-report.html
+          # behind whether it passes or fails, so nothing further is needed
+          # here to get one.
+          run: gmake CC=cc build
 
       - name: Upload test report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-report-otp-x86_64_netbsd
