@@ -45,6 +45,7 @@ build:
 	@bash test/recoverlast.test.sh
 	@bash test/randvault.test.sh
 	@bash test/vaultkeypair.test.sh
+	@bash test/reporthtml.test.sh
 	@echo " - Tested!"
 	@echo
 
@@ -90,6 +91,7 @@ musl:
 	@bash test/recoverlast.test.sh
 	@bash test/randvault.test.sh
 	@bash test/vaultkeypair.test.sh
+	@bash test/reporthtml.test.sh
 	@echo " - Tested!"
 	@echo
 

@@ -35,7 +35,7 @@ if [ ! -x bin/otp ] && [ ! -f bin/otp.exe ]; then
   exit 1
 fi
 
-TESTS="otp keychain commit lock metadata confirm lastcopy truncate status recoverlast randvault vaultkeypair"
+TESTS="otp keychain commit lock metadata confirm lastcopy truncate status recoverlast randvault vaultkeypair reporthtml"
 ESC_CHAR=$(printf '\033')
 REPO_URL="https://github.com/DavidValin/otp"
 
@@ -43,9 +43,7 @@ REPO_URL="https://github.com/DavidValin/otp"
 # from the source on a version bump.
 VERSION=$(sed -n 's/.*otp v\([0-9][0-9.]*\).*/\1/p' src/cli.c | head -1)
 
-html_escape() {
-  sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
-}
+. test/reportlib.sh
 
 BODY=$(mktemp) || exit 1
 trap 'rm -f "$BODY"' EXIT
@@ -82,9 +80,7 @@ for t in $TESTS; do
     echo "<summary><span class=\"badge $badge\">$label</span> <code>$script</code><span class=\"meta\">$p passed$extra &middot; $((t1-t0))s &middot; exit $rc</span></summary>"
     echo "<h3>Output</h3>"
     printf '<pre class="block">'
-    printf '%s\n' "$clean" | html_escape \
-      | sed -e 's/ - \(PASS\)/ - <b class="pass">\1<\/b>/' \
-            -e 's/! \(FAIL\)/! <b class="fail">\1<\/b>/'
+    printf '%s\n' "$clean" | html_escape | colorize_result
     printf '</pre>\n'
     echo "<details class=\"inner\">"
     echo "<summary>Source</summary>"
