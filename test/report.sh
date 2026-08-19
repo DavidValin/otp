@@ -6,9 +6,10 @@
 # (assertion lines colorized), and the script's own source, indentation
 # preserved. Unlike make, a failing script does not stop the run: every
 # script is executed so the report is always complete - and each script's
-# full captured output is also echoed straight to the console (colorized
-# the same way, when it's a terminal), so the console log is as complete a
-# record of every PASS/FAIL as the HTML report is.
+# assertion lines are also streamed live to the console (colorized the
+# same way, when it's a terminal) as that script produces them, one test
+# case at a time, so the console log is as complete a record of every
+# PASS/FAIL as the HTML report is.
 #
 # Usage: sh test/report.sh  (or `make test`)
 #
@@ -46,9 +47,22 @@ REPO_URL="https://github.com/DavidValin/otp"
 # convention every individual test/*.test.sh script uses for its own PASS/
 # FAIL lines (disabled when stdout isn't a terminal, e.g. under `make` or CI).
 if [ -t 1 ]; then
-  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); NC=$(printf '\033[0m')
+  GREEN=$(printf '\033[32m'); RED=$(printf '\033[31m'); YELLOW=$(printf '\033[33m'); NC=$(printf '\033[0m')
 else
-  GREEN=; RED=; NC=
+  GREEN=; RED=; YELLOW=; NC=
+fi
+
+# sed fully buffers its output (rather than flushing per line) whenever
+# that output isn't itself a terminal - which colorize_console's is not,
+# piped into as it is below - so without disabling that, every one of a
+# script's PASS/FAIL lines would sit in sed's buffer and appear all at
+# once when the script exits, defeating the point of streaming them live
+# as each test case actually runs. GNU sed calls that flag -u; BSD/macOS
+# sed has the same effect under -l instead.
+if sed --version >/dev/null 2>&1; then
+  SED_UNBUF="-u"
+else
+  SED_UNBUF="-l"
 fi
 
 # Version as declared in the cli.c banner, so the report can never drift
@@ -66,28 +80,39 @@ run_date=$(date '+%Y-%m-%d %H:%M:%S')
 for t in $TESTS; do
   script="test/$t.test.sh"
   total=$((total+1))
-  printf ' - %s ... ' "$script"
+  # Every suite's header line gets a blank line ahead of it and is painted
+  # yellow, so each suite boundary is easy to spot scrolling through a
+  # full run. Each suite's own PASS/FAIL content below is untouched.
+  printf '\n%s - %s%s\n' "$YELLOW" "$script" "$NC"
   t0=$(date +%s)
-  output=$($TEST_SHELL "$script" 2>&1)
-  rc=$?
+
+  # Stream each assertion line to the console (colorized) as the script
+  # produces it, one test case at a time, while tee also captures the
+  # same bytes to $OUTTMP for the HTML report below. A pipeline's $? is
+  # its last stage's (tee's), never the test script's, so the subshell
+  # writes the script's real exit code to $RC_FILE as a side channel.
+  OUTTMP=$(mktemp) || exit 1
+  RC_FILE=$(mktemp) || exit 1
+  ( $TEST_SHELL "$script" 2>&1; echo $? > "$RC_FILE" ) | tee "$OUTTMP" | colorize_console
+  rc=$(cat "$RC_FILE")
+  rm -f "$RC_FILE"
   t1=$(date +%s)
 
-  # Tests already suppress color when stdout is not a terminal, but strip
-  # ANSI sequences anyway so a stray code can never corrupt the HTML.
-  clean=$(printf '%s\n' "$output" | sed "s/${ESC_CHAR}\[[0-9;]*m//g")
+  # Tests already suppress color when stdout is not a terminal - and are
+  # always piped above, so they always take that branch regardless of the
+  # real terminal - but strip ANSI sequences anyway so a stray code can
+  # never corrupt the HTML.
+  clean=$(sed "s/${ESC_CHAR}\[[0-9;]*m//g" "$OUTTMP")
+  rm -f "$OUTTMP"
   p=$(printf '%s\n' "$clean" | grep -c ' - PASS')
   f=$(printf '%s\n' "$clean" | grep -c '! FAIL')
   pass_assert=$((pass_assert+p)); fail_assert=$((fail_assert+f))
 
   if [ "$rc" -eq 0 ]; then
-    badge=pass; label=PASS; echo "ok ($p assertions)"
+    badge=pass; label=PASS; echo "   ok ($p assertions)"
   else
-    badge=fail; label=FAIL; failed=$((failed+1)); echo "FAILED (exit $rc)"
+    badge=fail; label=FAIL; failed=$((failed+1)); echo "   FAILED (exit $rc)"
   fi
-  # The script's own captured output, in full - this is what makes the
-  # console log as complete a record as test-report.html: every assertion
-  # line this script printed, not just the one-line summary above.
-  printf '%s\n' "$clean" | colorize_console
   extra=""
   [ "$f" -gt 0 ] && extra=", $f failed"
 

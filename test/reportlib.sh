@@ -19,7 +19,10 @@ colorize_result() {
 # GREEN/RED/NC escape sequences. The caller is expected to have set those
 # to empty strings when its own stdout isn't a terminal, which makes this
 # a no-op then - the same convention every individual test/*.test.sh
-# script already uses for its own output.
+# script already uses for its own output. $SED_UNBUF (-u on GNU sed, -l on
+# BSD/macOS sed) disables sed's own output buffering, which otherwise
+# holds every line until the piped-in script exits - the caller sets it so
+# lines actually appear as each test case runs, not all at once at the end.
 colorize_console() {
-  sed -e "s/ - PASS/ - ${GREEN}PASS${NC}/" -e "s/! FAIL/! ${RED}FAIL${NC}/"
+  sed $SED_UNBUF -e "s/ - PASS/ - ${GREEN}PASS${NC}/" -e "s/! FAIL/! ${RED}FAIL${NC}/"
 }

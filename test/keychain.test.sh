@@ -57,7 +57,12 @@ else
   exit 1
 fi
 
-./bin/otp --has-contact bob > /dev/null
+# stdout and stderr both discarded: unlike the alice check above, bob is
+# expected NOT to exist, and otp's own --has-contact failure path prints
+# "FAIL" plus the reason to stderr - visible verbatim in this test's own
+# output if left uncaptured, indistinguishable at a glance from a real
+# assertion failure below even though this exit code is the expected one.
+./bin/otp --has-contact bob > /dev/null 2>&1
 if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - has contact correctly reports bob doesn't exist"
 else
@@ -142,7 +147,10 @@ else
   exit 1
 fi
 
-./bin/otp --has-contact bob > /dev/null
+# Same reasoning as the has-contact check above: bob is expected to be
+# gone now, so this is a normal exit-1 path whose stderr banner would
+# otherwise show up as a bare, uncolored "FAIL" in the log.
+./bin/otp --has-contact bob > /dev/null 2>&1
 if [ $? -ne 0 ]; then
   echo "     - ${GREEN}PASS${NC} - bob was successfully removed"
 else
