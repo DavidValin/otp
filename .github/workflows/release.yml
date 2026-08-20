@@ -105,27 +105,29 @@ jobs:
       - name: Build and test
         run: make ${{ matrix.make_target }}
 
-      # Re-runs the suite through test/report.sh to render test-report.html
-      # for this platform. For the qemu-tested targets the binary cannot run
-      # natively, so bin/otp is temporarily replaced by the same qemu wrapper
-      # the Makefile's test-arm32/test-riscv64 targets use. mingw is the one
-      # target with no report: its binary is a Windows executable the runner
-      # cannot execute. always() so a build that fails its tests still gets
-      # a report generated (and, in the next step, uploaded) instead of
-      # leaving this run with no visibility into what failed.
+      # `make build`/`make musl` (and native-arm64 `build`) already run the
+      # full suite through test/report.sh as their own "Testing..." step, so
+      # test-report.html exists by the time this runs - only the qemu targets
+      # need it generated here. test-arm32/test-riscv64 run their (curated)
+      # subset through a raw loop in the Makefile rather than report.sh, so
+      # nothing has produced a report for them yet; bin/otp is temporarily
+      # replaced by the same qemu wrapper the Makefile's test-arm32/
+      # test-riscv64 targets use so report.sh can execute it. Re-running
+      # report.sh for the other targets here would just execute the entire
+      # suite a second time for no new coverage. mingw is the one target
+      # with no report at all: its binary is a Windows executable the
+      # runner cannot execute. always() so a build that fails its tests
+      # still gets a report generated (and, in the next step, uploaded)
+      # instead of leaving this run with no visibility into what failed.
       - name: Generate HTML test report
-        if: always() && matrix.make_target != 'mingw'
+        if: always() && matrix.qemu != ''
         run: |
-          if [ -n "${{ matrix.qemu }}" ]; then
-            QEMU=$(command -v ${{ matrix.qemu }} || command -v ${{ matrix.qemu }}-static)
-            mv bin/otp bin/otp.target
-            printf '#!/bin/sh\nexec %s "$(dirname "$0")/otp.target" "$@"\n' "$QEMU" > bin/otp
-            chmod +x bin/otp
-            sh test/report.sh
-            mv bin/otp.target bin/otp
-          else
-            sh test/report.sh
-          fi
+          QEMU=$(command -v ${{ matrix.qemu }} || command -v ${{ matrix.qemu }}-static)
+          mv bin/otp bin/otp.target
+          printf '#!/bin/sh\nexec %s "$(dirname "$0")/otp.target" "$@"\n' "$QEMU" > bin/otp
+          chmod +x bin/otp
+          sh test/report.sh
+          mv bin/otp.target bin/otp
 
       # always() (rather than the default success-only) so this uploads
       # even when the build above failed - a failing platform's report,
