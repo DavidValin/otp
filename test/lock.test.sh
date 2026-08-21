@@ -91,19 +91,21 @@ fi
 LENA=$(wc -c < lock_plainA.txt | tr -d ' ')
 LENB=$(wc -c < lock_plainB.txt | tr -d ' ')
 
-# Both messages are the same length here, so exactly one of {0, LENA} must
-# be the offset A's ciphertext was really produced with, and likewise for
-# B - and they must land on DIFFERENT offsets from each other.
+# Both messages are the same length here, so one of them was message #1
+# (key range starting at 0) and the other message #2 (range starting
+# where #1's range - payload plus metadata overhead - ended), and they
+# must land on DIFFERENT ranges from each other.
 . test/xor.helper.sh
+LOCK_C1=$(meta_consumed_len "$LENA" 1 0)
 find_offset() {
   # args: plainfile cipherfile -> prints the offset that reproduces cipherfile, or "NONE"
   PLAINFILE=$1
   CIPHERFILE=$2
-  LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
-  for OFF in 0 "$LEN"; do
-    dd if=lock_key2.txt of=lock_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-    xor_with_key lock_slice.tmp "$PLAINFILE" lock_expected.tmp
-    rm -f lock_slice.tmp
+  for TRY in "0 1" "$LOCK_C1 2"; do
+    set -- $TRY
+    OFF=$1
+    SEQ=$2
+    make_cipher lock_key2.txt "$OFF" "$PLAINFILE" "$SEQ" "$OFF" lock_expected.tmp
     if cmp -s lock_expected.tmp "$CIPHERFILE"; then
       rm -f lock_expected.tmp
       echo "$OFF"
@@ -129,7 +131,7 @@ else
   exit 1
 fi
 
-TOTAL=$((LENA + LENB))
+TOTAL=$((LOCK_C1 + $(meta_consumed_len "$LENB" 2 "$LOCK_C1")))
 OUTPUT=$(./bin/otp --show-contact locktest2)
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: $TOTAL"
 if [ $? -eq 0 ]; then
@@ -166,75 +168,55 @@ dd if=/dev/urandom of=lock_key3.txt bs=1 count=1000 2>/dev/null
 dd if=/dev/urandom of=lock_key3.txt.dec bs=1 count=$(wc -c < lock_key3.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact locktest3 lock_key3.txt lock_key3.txt.dec > /dev/null 2>&1
 
-# Same length, so exactly one of {0, LEN} is each output's true key range
-printf 'ciphertext block AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > lock_ctA.bin
-printf 'ciphertext block BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB' > lock_ctB.bin
+# Both processes race to decrypt the SAME valid incoming message. The
+# serialized loser reloads the winner's committed state under the lock,
+# so its metadata validation sees a stale source_id/seq/offset and must
+# reject it (exit 5) without consuming anything. Without the lock, both
+# could read key offset 0 simultaneously and both "succeed" - consuming
+# the same key range twice and delivering the message twice.
+printf 'incoming message decrypted by exactly one racer' > lock_dplain.txt
+make_cipher lock_key3.txt.dec 0 lock_dplain.txt 1 0 lock_ct.bin
 
-./bin/otp -c locktest3 --decrypt < lock_ctA.bin > lock_ptA.bin 2>lock_dstderrA.log &
+./bin/otp -c locktest3 --decrypt < lock_ct.bin > lock_ptA.bin 2>lock_dstderrA.log &
 DPIDA=$!
-./bin/otp -c locktest3 --decrypt < lock_ctB.bin > lock_ptB.bin 2>lock_dstderrB.log &
+./bin/otp -c locktest3 --decrypt < lock_ct.bin > lock_ptB.bin 2>lock_dstderrB.log &
 DPIDB=$!
 wait $DPIDA
 DRCA=$?
 wait $DPIDB
 DRCB=$?
 
-if [ $DRCA -eq 0 ] && [ $DRCB -eq 0 ]; then
-  echo "     - ${GREEN}PASS${NC} - both concurrent decrypts completed successfully"
+if { [ $DRCA -eq 0 ] && [ $DRCB -eq 5 ]; } || { [ $DRCA -eq 5 ] && [ $DRCB -eq 0 ]; }; then
+  echo "     - ${GREEN}PASS${NC} - exactly one racer decrypted the message; the duplicate was rejected (A=$DRCA B=$DRCB)"
 else
-  echo "     ! ${RED}FAIL${NC} - a concurrent decrypt failed (A=$DRCA B=$DRCB)"
+  echo "     ! ${RED}FAIL${NC} - concurrent decrypts of one message must yield one success and one rejection (A=$DRCA B=$DRCB)"
   cat lock_dstderrA.log lock_dstderrB.log
   exit 1
 fi
 
-find_dec_offset() {
-  CIPHERFILE=$1
-  PLAINFILE=$2
-  LEN=$(wc -c < "$CIPHERFILE" | tr -d ' ')
-  for OFF in 0 "$LEN"; do
-    dd if=lock_key3.txt.dec of=lock_dslice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-    xor_with_key lock_dslice.tmp "$CIPHERFILE" lock_dexpected.tmp
-    rm -f lock_dslice.tmp
-    if cmp -s lock_dexpected.tmp "$PLAINFILE"; then
-      rm -f lock_dexpected.tmp
-      echo "$OFF"
-      return
-    fi
-  done
-  rm -f lock_dexpected.tmp
-  echo "NONE"
-}
-
-DOFFA=$(find_dec_offset lock_ctA.bin lock_ptA.bin)
-DOFFB=$(find_dec_offset lock_ctB.bin lock_ptB.bin)
-
-if [ "$DOFFA" = "NONE" ] || [ "$DOFFB" = "NONE" ]; then
-  echo "     ! ${RED}FAIL${NC} - a plaintext does not correspond to any expected key range"
-  exit 1
-fi
-
-if [ "$DOFFA" != "$DOFFB" ]; then
-  echo "     - ${GREEN}PASS${NC} - the two concurrent decrypts used disjoint key ranges ($DOFFA and $DOFFB)"
+if [ $DRCA -eq 0 ]; then DWINNER=lock_ptA.bin; DLOSER=lock_ptB.bin; else DWINNER=lock_ptB.bin; DLOSER=lock_ptA.bin; fi
+if cmp -s "$DWINNER" lock_dplain.txt && [ ! -s "$DLOSER" ]; then
+  echo "     - ${GREEN}PASS${NC} - the winner delivered the exact plaintext and the loser emitted nothing"
 else
-  echo "     ! ${RED}FAIL${NC} - both concurrent decrypts used the SAME key range ($DOFFA) - key reuse!"
+  echo "     ! ${RED}FAIL${NC} - winner/loser outputs are wrong"
   exit 1
 fi
 
-DLEN=$(wc -c < lock_ctA.bin | tr -d ' ')
-DTOTAL=$((DLEN + DLEN))
+DPLEN=$(wc -c < lock_dplain.txt | tr -d ' ')
+DTOTAL=$(meta_consumed_len "$DPLEN" 1 0)
 DOUT=$(./bin/otp --show-contact locktest3)
-DSEQ=$(echo "$DOUT" | grep -c "DecryptedSequence: 2")
+DSEQ=$(echo "$DOUT" | grep -c "DecryptedSequence: 1")
 DOFF=$(echo "$DOUT" | grep -c "DecryptionKeyOffset: $DTOTAL")
 
 if [ "$DSEQ" = "1" ] && [ "$DOFF" = "1" ]; then
-  echo "     - ${GREEN}PASS${NC} - decryption key offset and sequence count both messages exactly once"
+  echo "     - ${GREEN}PASS${NC} - the message's key range was consumed exactly once"
 else
   echo "     ! ${RED}FAIL${NC} - decrypt bookkeeping wrong after concurrent operations"
   echo "$DOUT"
   exit 1
 fi
 
-rm -f lock_key3.txt lock_key3.txt.dec lock_ctA.bin lock_ctB.bin lock_ptA.bin lock_ptB.bin
+rm -f lock_key3.txt lock_key3.txt.dec lock_ct.bin lock_dplain.txt lock_ptA.bin lock_ptB.bin
 rm -f lock_dstderrA.log lock_dstderrB.log
 
 # -----------------------------------------------------------------------------

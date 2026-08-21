@@ -29,6 +29,12 @@ echo "   - Full-key-consumption truncation"
 
 KEY_BYTES=1048576  # --new-key-pair 1 creates 1MB keys per direction
 
+# A message additionally consumes the 16-byte source_id chunk plus the
+# metadata pad, so full consumption means a payload smaller by exactly
+# that overhead (39 bytes for a first message: seq 1 and offset 0).
+. test/xor.helper.sh
+MSG_BYTES=$((KEY_BYTES - $(meta_consumed_len 0 1 0)))
+
 # run_full_consumption <contact-name>
 # Fresh keychain, 1MB keys, then encrypt a message of exactly KEY_BYTES.
 # Asserts: encrypt succeeds, key file is 0 bytes, metadata says 0 bytes,
@@ -46,7 +52,7 @@ run_full_consumption() {
     exit 1
   fi
 
-  dd if=/dev/zero of=trunc_full_msg.bin bs=$KEY_BYTES count=1 2>/dev/null
+  dd if=/dev/zero of=trunc_full_msg.bin bs=$MSG_BYTES count=1 2>/dev/null
   ./bin/otp -c "$NAME" --encrypt < trunc_full_msg.bin > trunc_cipher.bin 2>/dev/null
   if [ $? -eq 0 ]; then
     echo "     - ${GREEN}PASS${NC} - message consuming exactly all remaining key encrypts successfully"

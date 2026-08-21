@@ -31,8 +31,9 @@ echo ""
 echo "   - Commit / crash-recovery functionality"
 
 # -----------------------------------------------------------------------------
-#  helper: compute the expected ciphertext for the first N bytes of a key
-#  file, where N is the size of the given plaintext file
+#  helper: compute the expected ciphertext (metadata + message, per the
+#  wire format - see test/xor.helper.sh) for a message whose key range
+#  starts at byte OFF of the original key file. SEQ defaults to 1.
 # -----------------------------------------------------------------------------
 . test/xor.helper.sh
 expected_cipher() {
@@ -40,10 +41,8 @@ expected_cipher() {
   PLAINFILE=$2
   OFF=$3
   OUT=$4
-  LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
-  dd if="$KEYFILE" of=commit_key_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-  xor_with_key commit_key_slice.tmp "$PLAINFILE" "$OUT"
-  rm -f commit_key_slice.tmp
+  SEQ=${5:-1}
+  make_cipher "$KEYFILE" "$OFF" "$PLAINFILE" "$SEQ" "$OFF" "$OUT"
 }
 
 # -----------------------------------------------------------------------------
@@ -163,8 +162,9 @@ else
 fi
 
 MSGLEN=$(wc -c < commit_plainA.txt | tr -d ' ')
+CONSUMED=$(meta_consumed_len "$MSGLEN" 1 0)
 ACTUAL_KEY_SIZE=$(wc -c < .keychain/committest2_enc.key | tr -d ' ')
-EXPECTED_REMAINING=$((1000 - MSGLEN))
+EXPECTED_REMAINING=$((1000 - CONSUMED))
 if [ "$ACTUAL_KEY_SIZE" = "$EXPECTED_REMAINING" ]; then
   echo "     - ${GREEN}PASS${NC} - key file already truncated on disk despite stale metadata"
 else
@@ -197,7 +197,7 @@ fi
 
 OUTPUT=$(./bin/otp --show-contact committest2)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
-OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
+OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $CONSUMED")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
   echo "     - ${GREEN}PASS${NC} - metadata commit was finished correctly by recovery"
 else
@@ -217,7 +217,7 @@ fi
 # now-correct offset.
 printf 'real new message after recovery' > commit_plainB.txt
 ./bin/otp -c committest2 --encrypt < commit_plainB.txt > commit_cipherB.bin 2>/dev/null
-expected_cipher commit_key2.txt commit_plainB.txt "$MSGLEN" commit_expectedB.bin
+expected_cipher commit_key2.txt commit_plainB.txt "$CONSUMED" commit_expectedB.bin 2
 cmp -s commit_cipherB.bin commit_expectedB.bin
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - normal encryption resumed correctly after recovery"
@@ -253,9 +253,10 @@ else
 fi
 
 MSGLEN=$(wc -c < commit_plainC.txt | tr -d ' ')
+CONSUMED=$(meta_consumed_len "$MSGLEN" 1 0)
 OUTPUT=$(./bin/otp --show-contact committest3)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
-OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
+OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $CONSUMED")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
   echo "     - ${GREEN}PASS${NC} - key state was already fully committed before the simulated crash"
 else
@@ -284,7 +285,7 @@ fi
 
 OUTPUT=$(./bin/otp --show-contact committest3)
 SEQ_OK=$(echo "$OUTPUT" | grep -c "EncryptedSequence: 1")
-OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $MSGLEN")
+OFF_OK=$(echo "$OUTPUT" | grep -c "EncryptionKeyOffset: $CONSUMED")
 if [ "$SEQ_OK" = "1" ] && [ "$OFF_OK" = "1" ]; then
   echo "     - ${GREEN}PASS${NC} - redelivery did not double-consume key material"
 else
@@ -358,7 +359,7 @@ rm -f commit_decstderr.log commit_decstderr2.log
 #  Recovery redelivers the previous run's output and leaves this run's
 #  input entirely unprocessed. Exiting 0 there would let a script believe
 #  its message had been encrypted when the bytes it got back belong to a
-#  different message. It gets its own exit code (KEYCHAIN_REDELIVERED = 3).
+#  different message. It gets its own exit code (KEYCHAIN_REDELIVERED = 8).
 # -----------------------------------------------------------------------------
 
 echo "     Testing that a redelivery is not reported as success..."
@@ -375,10 +376,10 @@ printf 'second message, must not be silently dropped' > commit_rdsecond.txt
 ./bin/otp -c redeliv --encrypt < commit_rdsecond.txt > commit_rdout.bin 2>/dev/null
 RC=$?
 
-if [ $RC -eq 3 ]; then
-  echo "     - ${GREEN}PASS${NC} - redelivery exits 3, distinguishable from success"
+if [ $RC -eq 8 ]; then
+  echo "     - ${GREEN}PASS${NC} - redelivery exits 8, distinguishable from success"
 else
-  echo "     ! ${RED}FAIL${NC} - redelivery exited $RC (expected 3)"
+  echo "     ! ${RED}FAIL${NC} - redelivery exited $RC (expected 8)"
   exit 1
 fi
 
@@ -388,7 +389,9 @@ RC2=$?
 OFF=$(grep '^EncryptionKeyOffset=' .keychain/redeliv.meta | cut -d= -f2)
 LEN1=$(wc -c < commit_rdfirst.txt | tr -d ' ')
 LEN2=$(wc -c < commit_rdsecond.txt | tr -d ' ')
-EXPECTED_OFF=$((LEN1 + LEN2))
+C1=$(meta_consumed_len "$LEN1" 1 0)
+C2=$(meta_consumed_len "$LEN2" 2 "$C1")
+EXPECTED_OFF=$((C1 + C2))
 
 if [ $RC2 -eq 0 ] && [ "$OFF" = "$EXPECTED_OFF" ]; then
   echo "     - ${GREEN}PASS${NC} - re-running then processes the skipped input, consuming key exactly once"
@@ -573,7 +576,7 @@ if [ -w /dev/full ]; then
   expected_cipher commit_fullkey.txt commit_fullmsg.txt 0 commit_fullexp.bin
   cmp -s commit_fullout.bin commit_fullexp.bin
   CMP_RC=$?
-  if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
+  if [ $RC -eq 8 ] && [ $CMP_RC -eq 0 ]; then
     echo "     - ${GREEN}PASS${NC} - the message is redelivered byte-exact on the next run"
   else
     echo "     ! ${RED}FAIL${NC} - message not recovered after the failed delivery (exit $RC)"
@@ -756,7 +759,7 @@ OTP_TEST_CRASH_POINT=after_meta_staged ./bin/otp -c metapartial --encrypt \
   < commit_mmsg.txt > /dev/null 2>/dev/null
 RC=$?
 MSGLEN=$(wc -c < commit_mmsg.txt | tr -d ' ')
-EXPECT_KEY=$((2000 - MSGLEN))
+EXPECT_KEY=$((2000 - $(meta_consumed_len "$MSGLEN" 1 0)))
 KEYSIZE=$(wc -c < .keychain/metapartial_enc.key | tr -d ' ')
 SEQ=$(grep '^EncryptedSequence=' .keychain/metapartial.meta | cut -d= -f2)
 FIELDS=$(grep -c '=' .keychain/metapartial.meta)
@@ -782,7 +785,7 @@ RC=$?
 cmp -s commit_mout.bin commit_mexp.bin
 CMP_RC=$?
 
-if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
+if [ $RC -eq 8 ] && [ $CMP_RC -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - recovery finishes the interrupted .meta commit and redelivers exactly"
 else
   echo "     ! ${RED}FAIL${NC} - recovery after an interrupted .meta commit was wrong (exit $RC)"
@@ -808,8 +811,17 @@ dd if=/dev/urandom of=commit_dkey.txt bs=1 count=1000 2>/dev/null
 dd if=/dev/urandom of=commit_dkey.txt.dec bs=1 count=$(wc -c < commit_dkey.txt | tr -d ' ') 2>/dev/null
 ./bin/otp --add-contact decparity commit_dkey.txt commit_dkey.txt.dec > /dev/null 2>&1
 
-# 1. input longer than the remaining decryption key, spanning chunks
-dd if=/dev/urandom of=commit_dbig.bin bs=1 count=1500 2>/dev/null
+# 1. input longer than the remaining decryption key, spanning chunks.
+#    Built with a VALID metadata block (otherwise the metadata layer
+#    rejects it before the size check ever runs) followed by a payload
+#    the 1000-byte key cannot cover.
+make_meta commit_dkey.txt.dec 0 1 0 commit_dmeta.tmp
+DMETA_LEN=$(wc -c < commit_dmeta.tmp | tr -d ' ')
+dd if=commit_dkey.txt.dec of=commit_dpad.tmp bs=1 skip=16 count="$DMETA_LEN" 2>/dev/null
+xor_with_key commit_dpad.tmp commit_dmeta.tmp commit_dmetac.tmp
+dd if=/dev/urandom of=commit_dpayload.tmp bs=1 count=1500 2>/dev/null
+cat commit_dmetac.tmp commit_dpayload.tmp > commit_dbig.bin
+rm -f commit_dmeta.tmp commit_dpad.tmp commit_dmetac.tmp commit_dpayload.tmp
 ./bin/otp -c decparity --decrypt < commit_dbig.bin > commit_dout.bin 2>commit_derr1.log
 RC=$?
 OFF=$(grep '^DecryptionKeyOffset=' .keychain/decparity.meta | cut -d= -f2)
@@ -833,7 +845,10 @@ GREP_RC=$?
 SIZE=$(grep '^DecryptionKeySize=' .keychain/decparity.meta | cut -d= -f2)
 ACTUAL=$(wc -c < .keychain/decparity_dec.key | tr -d ' ')
 
-if [ $RC -eq 0 ] && [ $GREP_RC -eq 0 ] && [ "$SIZE" = "$ACTUAL" ]; then
+# The raw probe input has no valid metadata, so the run itself is
+# rejected (exit 5) - but the resync must already have healed and
+# persisted the corrected size by then.
+if [ $GREP_RC -eq 0 ] && [ "$SIZE" = "$ACTUAL" ]; then
   echo "     - ${GREEN}PASS${NC} - drifted decryption metadata self-heals toward the key file"
 else
   echo "     ! ${RED}FAIL${NC} - decrypt resync did not heal (exit $RC, meta $SIZE, actual $ACTUAL)"
@@ -885,7 +900,7 @@ if [ -w /dev/full ]; then
   cmp -s commit_dfout.bin commit_dfplain.txt
   CMP_RC=$?
 
-  if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
+  if [ $RC -eq 8 ] && [ $CMP_RC -eq 0 ]; then
     echo "     - ${GREEN}PASS${NC} - the plaintext is recovered byte-exact on the next run"
   else
     echo "     ! ${RED}FAIL${NC} - plaintext not recovered after failed delivery (exit $RC)"
@@ -940,11 +955,11 @@ else
 fi
 
 # Crucially, the run must then process its own input normally
-expected_cipher commit_ukey.txt commit_umsg.txt "$OFF_BEFORE" commit_uexp.bin
+expected_cipher commit_ukey.txt commit_umsg.txt "$OFF_BEFORE" commit_uexp.bin 2
 cmp -s commit_uout.bin commit_uexp.bin
 CMP_RC=$?
 MSGLEN=$(wc -c < commit_umsg.txt | tr -d ' ')
-EXPECT_OFF=$((OFF_BEFORE + MSGLEN))
+EXPECT_OFF=$((OFF_BEFORE + $(meta_consumed_len "$MSGLEN" 2 "$OFF_BEFORE")))
 OFF_AFTER=$(grep '^EncryptionKeyOffset=' .keychain/unknownstate.meta | cut -d= -f2)
 
 if [ $RC -eq 0 ] && [ $CMP_RC -eq 0 ] && [ "$OFF_AFTER" = "$EXPECT_OFF" ]; then
@@ -1209,7 +1224,7 @@ if [ "$(id -u)" != "0" ]; then
   rm -rf .keychain/iofail.meta.tmp
   MSGLEN=$(wc -c < commit_iomsg.txt | tr -d ' ')
   KEY_AFTER=$(wc -c < .keychain/iofail_enc.key | tr -d ' ')
-  EXPECT=$((KEY_BEFORE - MSGLEN))
+  EXPECT=$((KEY_BEFORE - $(meta_consumed_len "$MSGLEN" 2 "$OFF_BEFORE")))
   grep -q "cannot create .keychain/iofail.meta.tmp" commit_ioerr3.log
   G=$?
 
@@ -1222,12 +1237,12 @@ if [ "$(id -u)" != "0" ]; then
   fi
 
   # and that state must recover exactly like a crash in the same window
-  expected_cipher commit_iokey.txt commit_iomsg.txt "$OFF_BEFORE" commit_ioexp.bin
+  expected_cipher commit_iokey.txt commit_iomsg.txt "$OFF_BEFORE" commit_ioexp.bin 2
   printf 'ignored' | ./bin/otp -c iofail --encrypt > commit_ioout.bin 2>/dev/null
   RC=$?
   cmp -s commit_ioout.bin commit_ioexp.bin
   CMP_RC=$?
-  if [ $RC -eq 3 ] && [ $CMP_RC -eq 0 ]; then
+  if [ $RC -eq 8 ] && [ $CMP_RC -eq 0 ]; then
     echo "     - ${GREEN}PASS${NC} - the interrupted commit recovers and redelivers byte-exact"
   else
     echo "     ! ${RED}FAIL${NC} - recovery after a failed .meta write was wrong (exit $RC)"

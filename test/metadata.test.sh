@@ -62,16 +62,19 @@ else
   exit 1
 fi
 
+. test/xor.helper.sh
 LENA=$(wc -c < meta_plainA.txt | tr -d ' ')
 LENB=$(wc -c < meta_plainB.txt | tr -d ' ')
+CONSA=$(meta_consumed_len "$LENA" 1 0)
+CONSB=$(meta_consumed_len "$LENB" 1 0)
 
 OUTPUT_A=$(./bin/otp --show-contact metaA)
 OUTPUT_B=$(./bin/otp --show-contact metaB)
 
 SEQ_A_OK=$(echo "$OUTPUT_A" | grep -c "EncryptedSequence: 1")
-OFF_A_OK=$(echo "$OUTPUT_A" | grep -c "EncryptionKeyOffset: $LENA")
+OFF_A_OK=$(echo "$OUTPUT_A" | grep -c "EncryptionKeyOffset: $CONSA")
 SEQ_B_OK=$(echo "$OUTPUT_B" | grep -c "EncryptedSequence: 1")
-OFF_B_OK=$(echo "$OUTPUT_B" | grep -c "EncryptionKeyOffset: $LENB")
+OFF_B_OK=$(echo "$OUTPUT_B" | grep -c "EncryptionKeyOffset: $CONSB")
 
 if [ "$SEQ_A_OK" = "1" ] && [ "$OFF_A_OK" = "1" ] && [ "$SEQ_B_OK" = "1" ] && [ "$OFF_B_OK" = "1" ]; then
   echo "     - ${GREEN}PASS${NC} - both contacts' metadata reflects their own update - neither was overwritten by the other"
@@ -84,9 +87,8 @@ fi
 
 # Also confirm the ciphertext each process produced is actually correct,
 # not just that the bookkeeping looks right.
-. test/xor.helper.sh
-xor_with_key meta_keyA.txt meta_plainA.txt meta_expectedA.bin
-xor_with_key meta_keyB.txt meta_plainB.txt meta_expectedB.bin
+make_cipher meta_keyA.txt 0 meta_plainA.txt 1 0 meta_expectedA.bin
+make_cipher meta_keyB.txt 0 meta_plainB.txt 1 0 meta_expectedB.bin
 
 cmp -s meta_cipherA.bin meta_expectedA.bin
 CIPHER_A_OK=$?
@@ -141,13 +143,20 @@ else
 fi
 
 # The dangerous step was a *later* process loading that .meta and saving
-# it again - that is where the out-of-bounds read happened.
+# it again - that is where the out-of-bounds read happened. The trigger
+# must be a VALID incoming message (a raw probe would be rejected by the
+# metadata layer before any save).
+. test/xor.helper.sh
 ./bin/otp --show-contact bulky > /dev/null 2>&1
-printf 'trigger a save' | ./bin/otp -c bulky --decrypt > /dev/null 2>&1
+printf 'trigger a save' > meta_trigger.txt
+make_cipher meta_bigkey.txt.dec 0 meta_trigger.txt 1 0 meta_trigger.bin
+./bin/otp -c bulky --decrypt < meta_trigger.bin > /dev/null 2>&1
 RC=$?
 OFFSET=$(grep '^EncryptionKeyOffset=' .keychain/bulky.meta | cut -d= -f2)
+BIGLEN=$(wc -c < meta_bigmsg.bin | tr -d ' ')
+EXPECT_OFFSET=$(meta_consumed_len "$BIGLEN" 1 0)
 
-if [ $RC -eq 0 ] && [ "$OFFSET" = "14680064" ]; then
+if [ $RC -eq 0 ] && [ "$OFFSET" = "$EXPECT_OFFSET" ]; then
   echo "     - ${GREEN}PASS${NC} - a later process reloads and re-saves that .meta safely"
 else
   echo "     ! ${RED}FAIL${NC} - reload/re-save after a large message misbehaved (exit $RC, offset $OFFSET)"

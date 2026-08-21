@@ -356,25 +356,261 @@ static void offer_recover_last_copy(const char *contact_name, int is_encrypt)
 }
 
 // ---------------------------------------------------------------------------
+// Per-message metadata layer
+//
+// Every encrypted message carries a small binary metadata block, itself
+// encrypted, prepended to the plaintext before the XOR pass:
+//
+//   0x01 <source_id: 16 bytes>           - a chunk of the key itself
+//   0x02 <len: varint> <seq: len bytes>  - message sequence, big-endian
+//   0x03 <len: varint> <off: len bytes>  - absolute key offset, big-endian
+//
+// Tags, lengths and values are all raw binary. The length field is a
+// ULEB128 varint (7 value bits per byte, high bit set on every byte but
+// the last), so a value may be of ANY byte-length: values up to 127
+// bytes wide need a single length byte, wider ones grow the length
+// field itself. seq and offset are written with the minimal number of
+// bytes for their value, so the whole block is typically 23 bytes. This
+// build's own counters are 64-bit, so it never WRITES a value wider
+// than 8 bytes - but it PARSES any width: a well-formed value too wide
+// to ever equal this build's expected seq/offset simply fails that
+// field's validation (it cannot be the expected value), it is not
+// treated as a malformed message. The key range one message consumes is
+// one contiguous run:
+//
+//   [off, off+16)    the source_id chunk, embedded (encrypted) in the
+//                    metadata and never used as pad
+//   [off+16, off+16+N) the XOR pad for the N = metadata+plaintext bytes
+//
+// Both sides therefore consume exactly N+16 key bytes per message. On
+// decrypt the metadata is validated BEFORE any key is spent: the
+// source_id must equal the decryption key's own next 16 bytes (proving
+// the message was produced with the mirror of this exact key at this
+// exact position), and seq/offset must be exactly the ones this contact
+// expects next. Any mismatch rejects the message with a distinct exit
+// code (see cipher.h), prints the reasons to stderr, consumes no key,
+// and emits nothing. On success the metadata is stripped: the delivered
+// plaintext is exactly the original message.
+// ---------------------------------------------------------------------------
+
+#define META_TAG_SOURCE 0x01
+#define META_TAG_SEQ 0x02
+#define META_TAG_OFFSET 0x03
+#define META_SOURCE_LEN 16
+// Largest possible block: three 1-byte tags, the fixed-size source_id,
+// and two length-prefixed big-endian integers of at most 8 bytes each.
+#define META_MAX_LEN (1 + META_SOURCE_LEN + 2 * (1 + 1 + 8))
+
+// Minimal big-endian encoding of an unsigned value; returns the number
+// of bytes written (1-8; the value 0 still takes one byte).
+static size_t meta_encode_uint(size_t value, unsigned char *out)
+{
+  unsigned char tmp[8];
+  size_t n = 0;
+  do
+  {
+    tmp[n++] = (unsigned char)(value & 0xff);
+    value >>= 8;
+  } while (value > 0);
+  for (size_t i = 0; i < n; i++)
+    out[i] = tmp[n - 1 - i];
+  return n;
+}
+
+// Serialize the metadata block into buf (at least META_MAX_LEN bytes);
+// returns its total length. The length fields are ULEB128 varints; the
+// widths this build emits (1-8, from its 64-bit counters) always fit in
+// a single length byte with the continuation bit clear, so writing the
+// raw count IS the varint encoding.
+static size_t meta_build(unsigned char *buf, const unsigned char *source_id,
+                         size_t sequence, size_t offset)
+{
+  unsigned char enc[8];
+  size_t n, pos = 0;
+  buf[pos++] = META_TAG_SOURCE;
+  memcpy(buf + pos, source_id, META_SOURCE_LEN);
+  pos += META_SOURCE_LEN;
+  buf[pos++] = META_TAG_SEQ;
+  n = meta_encode_uint(sequence, enc);
+  buf[pos++] = (unsigned char)n;
+  memcpy(buf + pos, enc, n);
+  pos += n;
+  buf[pos++] = META_TAG_OFFSET;
+  n = meta_encode_uint(offset, enc);
+  buf[pos++] = (unsigned char)n;
+  memcpy(buf + pos, enc, n);
+  pos += n;
+  return pos;
+}
+
+typedef struct
+{
+  unsigned char source_id[META_SOURCE_LEN];
+  size_t sequence;
+  size_t offset;
+  int seq_oversize; // value wider than this build's counters - can never
+  int off_oversize; // equal the expected value, but is well-formed wire
+  size_t meta_len;  // total metadata bytes consumed from the ciphertext
+} MessageMeta;
+
+// Streaming decryptor over the metadata bytes: one input byte XOR one
+// key pad byte at a time, counting how many have been consumed. Values
+// may be of any length, so nothing here is buffered whole.
+typedef struct
+{
+  FILE *input;
+  FILE *keyfile;
+  size_t count;
+} MetaReader;
+
+// 0 on success, -1 input ended, -2 key ended/failed.
+static int meta_next_byte(MetaReader *r, unsigned char *out)
+{
+  unsigned char c, k;
+  if (fread(&c, 1, 1, r->input) != 1)
+    return -1;
+  if (fread(&k, 1, 1, r->keyfile) != 1)
+    return -2;
+  *out = c ^ k;
+  r->count++;
+  return 0;
+}
+
+// Read a ULEB128 length field. 0 on success, -1 malformed (zero length,
+// or a length so wide it cannot describe real bytes on any system),
+// -2 key ended.
+static int meta_read_varint_len(MetaReader *r, unsigned long long *len)
+{
+  unsigned long long v = 0;
+  int shift = 0;
+  for (;;)
+  {
+    unsigned char b;
+    int rc = meta_next_byte(r, &b);
+    if (rc != 0)
+      return rc;
+    if (shift > 63 || (shift == 63 && (b & 0x7f) > 1))
+      return -1; // length itself beyond 2^64 bytes - not a real message
+    v |= (unsigned long long)(b & 0x7f) << shift;
+    if (!(b & 0x80))
+      break;
+    shift += 7;
+  }
+  if (v == 0)
+    return -1; // a value always takes at least one byte
+  *len = v;
+  return 0;
+}
+
+// Read a big-endian value of `len` bytes, of any length, in O(1)
+// memory: leading zero bytes are skipped, and once more significant
+// bytes arrive than this build's size_t holds the value is flagged
+// oversize (it can never equal an expected seq/offset) while the
+// remaining bytes are still consumed to keep the stream aligned.
+static int meta_read_value(MetaReader *r, unsigned long long len,
+                           size_t *value, int *oversize)
+{
+  unsigned long long v = 0, significant = 0;
+  *oversize = 0;
+  for (unsigned long long i = 0; i < len; i++)
+  {
+    unsigned char b;
+    int rc = meta_next_byte(r, &b);
+    if (rc != 0)
+      return rc;
+    if (significant == 0 && b == 0)
+      continue;
+    significant++;
+    if (significant > sizeof(size_t))
+    {
+      *oversize = 1;
+      continue;
+    }
+    v = (v << 8) | b;
+  }
+  *value = *oversize ? 0 : (size_t)v;
+  return 0;
+}
+
+// Read the metadata block from the front of `input`, decrypting it with
+// pad bytes read from `keyfile` (already positioned past the source_id
+// chunk). Returns 0 with *out filled on success; -1 if the input is too
+// short or structurally not a metadata block (bad tag, impossible
+// length field) - which is also what any pre-metadata or foreign
+// ciphertext decodes to; -2 if the *key* ran out or failed to read
+// (an absurd declared length lands here too: the key file bounds how
+// many pad bytes can ever exist).
+static int meta_read_decrypt(FILE *input, FILE *keyfile, MessageMeta *out)
+{
+  MetaReader r = {input, keyfile, 0};
+  unsigned char b;
+  int rc;
+  unsigned long long len;
+
+  if ((rc = meta_next_byte(&r, &b)) != 0)
+    return rc;
+  if (b != META_TAG_SOURCE)
+    return -1;
+  for (size_t i = 0; i < META_SOURCE_LEN; i++)
+  {
+    if ((rc = meta_next_byte(&r, &b)) != 0)
+      return rc;
+    out->source_id[i] = b;
+  }
+
+  if ((rc = meta_next_byte(&r, &b)) != 0)
+    return rc;
+  if (b != META_TAG_SEQ)
+    return -1;
+  if ((rc = meta_read_varint_len(&r, &len)) != 0)
+    return rc;
+  if ((rc = meta_read_value(&r, len, &out->sequence, &out->seq_oversize)) != 0)
+    return rc;
+
+  if ((rc = meta_next_byte(&r, &b)) != 0)
+    return rc;
+  if (b != META_TAG_OFFSET)
+    return -1;
+  if ((rc = meta_read_varint_len(&r, &len)) != 0)
+    return rc;
+  if ((rc = meta_read_value(&r, len, &out->offset, &out->off_oversize)) != 0)
+    return rc;
+
+  out->meta_len = r.count;
+  return 0;
+}
+
+// Map a validation verdict to the documented exit codes (see cipher.h).
+static int meta_validation_code(int bad_source, int bad_seq, int bad_offset)
+{
+  if (bad_source && bad_seq && bad_offset)
+    return KEYCHAIN_META_BAD_ALL;
+  if (bad_source && bad_seq)
+    return KEYCHAIN_META_BAD_SOURCE_SEQ;
+  if (bad_source && bad_offset)
+    return KEYCHAIN_META_BAD_SOURCE_OFFSET;
+  if (bad_seq && bad_offset)
+    return KEYCHAIN_META_BAD_SEQ_OFFSET;
+  if (bad_source)
+    return KEYCHAIN_META_BAD_SOURCE;
+  if (bad_seq)
+    return KEYCHAIN_META_BAD_SEQ;
+  return KEYCHAIN_META_BAD_OFFSET;
+}
+
+// ---------------------------------------------------------------------------
 // Delivery-confirmation gate
 //
-// The ciphertext this tool emits is raw XOR output: it carries no
-// sequence number, offset or length. Decryption simply consumes the
-// front of the decryption key by however many bytes arrive, so within
-// one direction the protocol is only correct if every message arrives in
-// the order it was sent, complete, exactly once. A message that is lost,
-// reordered, duplicated or truncated in transit makes the next decrypt
-// XOR against the wrong key range - producing garbage with exit code 0
-// while physically destroying the key bytes both messages needed, which
-// leaves them permanently unrecoverable.
-//
-// The program cannot see the transport, so that in-order property is
-// only verifiable by the correspondents themselves, out of band. This
-// gate makes that verification an enforced checkpoint instead of a
-// silent assumption: before key is spent on any message after the first
-// in a direction, the operator must confirm on the terminal that the
-// previous message in that direction arrived and decoded correctly.
-// Anything but an explicit yes cancels the operation.
+// Within one direction the protocol is only correct if every message
+// arrives in the order it was sent, complete, exactly once. The
+// metadata layer above rejects a message that is out of order or from
+// the wrong source BEFORE any key is spent - but it cannot tell the
+// sender anything, and it cannot restore a channel that has already
+// desynchronized. This gate keeps the correspondents themselves in the
+// loop: before key is spent on any message after the first in a
+// direction, the operator must confirm on the terminal that the previous
+// message in that direction arrived and decoded correctly. Anything but
+// an explicit yes cancels the operation.
 //
 // Placement in the callers is load-bearing: the prompt runs after the
 // output is fully staged and verified but BEFORE commit_publish - i.e.
@@ -815,6 +1051,8 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   }
 
   size_t available_key = c->EncryptionKeySize;
+  size_t new_sequence = c->EncryptedSequence + 1;
+  size_t range_offset = c->EncryptionKeyOffset;
 
   // Open encryption key file (always read from beginning)
   FILE *keyfile = fopen(c->EncryptionKeyPath, "rb");
@@ -822,6 +1060,31 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   {
     fprintf(stderr, "Error: Cannot open encryption key file '%s': %s\n",
             c->EncryptionKeyPath, strerror(errno));
+    return -1;
+  }
+
+  // The message's key range opens with its source_id chunk: the next 16
+  // key bytes, embedded (encrypted) in the metadata rather than used as
+  // pad. The pad for metadata+plaintext follows contiguously.
+  unsigned char source_id[META_SOURCE_LEN];
+  unsigned char meta_plain[META_MAX_LEN];
+  unsigned char meta_pad[META_MAX_LEN];
+  if (fread(source_id, 1, META_SOURCE_LEN, keyfile) != META_SOURCE_LEN)
+  {
+    fprintf(stderr, "Error: Message size exceeds available encryption key size for contact '%s'\n",
+            contact_name);
+    fclose(keyfile);
+    return -1;
+  }
+  size_t meta_len = meta_build(meta_plain, source_id, new_sequence, range_offset);
+  // Reserved key bytes that are spent per message on top of the payload
+  // pad: the source_id chunk plus the metadata's own pad.
+  size_t reserved = META_SOURCE_LEN + meta_len;
+  if (available_key < reserved + 1)
+  {
+    fprintf(stderr, "Error: Message size exceeds available encryption key size for contact '%s'\n",
+            contact_name);
+    fclose(keyfile);
     return -1;
   }
 
@@ -855,6 +1118,28 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
     return -1;
   }
 
+  // The encrypted metadata block leads the ciphertext; its pad is the
+  // key run immediately after the source_id chunk read above.
+  if (fread(meta_pad, 1, meta_len, keyfile) != meta_len)
+  {
+    fprintf(stderr, "Error: Failed to read encryption key\n");
+    free(chunk);
+    free(key_chunk);
+    fclose(keyfile);
+    commit_stage_abort(&stage);
+    return -1;
+  }
+  for (size_t i = 0; i < meta_len; i++)
+    meta_plain[i] ^= meta_pad[i];
+  if (commit_stage_write(&stage, meta_plain, meta_len) != 0)
+  {
+    free(chunk);
+    free(key_chunk);
+    fclose(keyfile);
+    commit_stage_abort(&stage);
+    return -1;
+  }
+
   size_t total_bytes = 0;
 
   while (1)
@@ -864,8 +1149,12 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
     if (input_bytes == 0)
       break;
 
-    // Check if we have enough key material
-    if (total_bytes + input_bytes > available_key)
+    // Check if we have enough key material (the source_id chunk and the
+    // metadata pad are already reserved out of this message's range).
+    // Written as a subtraction so it cannot wrap on a key close to
+    // SIZE_MAX: reserved <= available_key was established before the
+    // loop and total_bytes never exceeds the remainder.
+    if (input_bytes > available_key - reserved - total_bytes)
     {
       fprintf(stderr, "Error: Message size exceeds available encryption key size for contact '%s'\n",
               contact_name);
@@ -935,8 +1224,9 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
     return -1;
   }
 
-  size_t new_sequence = c->EncryptedSequence + 1;
-  size_t range_offset = c->EncryptionKeyOffset;
+  // Everything this message spends: source_id chunk + metadata pad +
+  // payload pad, one contiguous key range.
+  size_t total_consumed = reserved + total_bytes;
 
   // Delivery-confirmation gate: the operator must vouch that the previous
   // message reached the other side intact before this one's key range is
@@ -945,7 +1235,7 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   // staging file to discard and provably consumes no key.
   if (confirm_previous_delivery(contact_name, 1, c->EncryptedSequence,
                                 c->LastMessageSentAt, new_sequence,
-                                range_offset, total_bytes) != 0)
+                                range_offset, total_consumed) != 0)
   {
     commit_discard_path(stage.tmp_path);
     return -1;
@@ -956,7 +1246,7 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   // evidence, safe to exist independently of what happens next.
   char pending_final_path[600];
   commit_pending_path(keychain_dir, contact_name, "enc", new_sequence,
-                       range_offset, total_bytes, pending_final_path, sizeof(pending_final_path));
+                       range_offset, total_consumed, pending_final_path, sizeof(pending_final_path));
 
   if (commit_publish(stage.tmp_path, pending_final_path) != 0)
   {
@@ -969,8 +1259,8 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   // Truncate consumed bytes from the key file: stream what remains into a
   // staging file, verify it, and only then publish it over the real key
   // file.
-  size_t remaining_size = c->EncryptionKeySize - total_bytes;
-  if (truncate_key_file("encryption", c->EncryptionKeyPath, total_bytes, remaining_size) != 0)
+  size_t remaining_size = c->EncryptionKeySize - total_consumed;
+  if (truncate_key_file("encryption", c->EncryptionKeyPath, total_consumed, remaining_size) != 0)
   {
     commit_discard_path(pending_final_path);
     return -1;
@@ -981,7 +1271,7 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   // Update and commit the contact's .meta file (the key file is already
   // committed at this point - this is the second, final half of the pair).
   c->EncryptedSequence = new_sequence;
-  c->EncryptionKeyOffset = range_offset + total_bytes;
+  c->EncryptionKeyOffset = range_offset + total_consumed;
   c->EncryptionKeySize = remaining_size;
   c->LastMessageSentAt = time(NULL);
 
@@ -1011,7 +1301,7 @@ static int encrypt_with_contact_locked(Contact *c, const char *contact_name,
   {
     int err_tty = keychain_stderr_is_tty();
     fprintf(stderr, "%sUsed %zu bytes from encryption key for contact '%s'%s\n",
-            err_tty ? KEYCHAIN_GREEN : "", total_bytes, contact_name,
+            err_tty ? KEYCHAIN_GREEN : "", total_consumed, contact_name,
             err_tty ? KEYCHAIN_RESET : "");
     fprintf(stderr, "%sRemaining encryption key: %zu bytes%s\n",
             err_tty ? KEYCHAIN_GREEN : "", c->EncryptionKeySize,
@@ -1155,20 +1445,9 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
     return -1;
   }
 
-  // First consumption of this key - record its head in the spent-heads
-  // registry before anything is spent. See encrypt_with_contact_locked
-  // for why this must happen first and must fail closed.
-  if (c->DecryptionKeyOffset == 0 &&
-      spent_head_record(keychain_dir, "dec", c->DecryptionKeyPath) != 0)
-  {
-    fprintf(stderr,
-            "Error: could not record the spent-key fingerprint for contact '%s'; "
-            "aborting before any key material is spent\n",
-            contact_name);
-    return -1;
-  }
-
   size_t available_key = c->DecryptionKeySize;
+  size_t new_sequence = c->DecryptedSequence + 1;
+  size_t range_offset = c->DecryptionKeyOffset;
 
   // Open decryption key file (always read from beginning)
   FILE *keyfile = fopen(c->DecryptionKeyPath, "rb");
@@ -1176,6 +1455,102 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   {
     fprintf(stderr, "Error: Cannot open decryption key file '%s': %s\n",
             c->DecryptionKeyPath, strerror(errno));
+    return -1;
+  }
+
+  // The message's key range must open with its source_id chunk - the
+  // sender embedded (encrypted) the mirror key's next 16 bytes in the
+  // metadata, so these are what the message's source_id must equal.
+  unsigned char expected_source[META_SOURCE_LEN];
+  if (fread(expected_source, 1, META_SOURCE_LEN, keyfile) != META_SOURCE_LEN)
+  {
+    fprintf(stderr, "Error: Message size exceeds available decryption key size for contact '%s'\n",
+            contact_name);
+    fclose(keyfile);
+    return -1;
+  }
+
+  // Read and decrypt the metadata block, then validate it BEFORE any
+  // staging or key consumption: an invalid message is rejected here with
+  // nothing emitted and provably zero key spent.
+  int err_tty = keychain_stderr_is_tty();
+  const char *fail_red = err_tty ? KEYCHAIN_RED : "";
+  const char *fail_rst = err_tty ? KEYCHAIN_RESET : "";
+  MessageMeta meta;
+  int meta_rc = meta_read_decrypt(input, keyfile, &meta);
+  if (meta_rc == -2)
+  {
+    fprintf(stderr, "Error: Message size exceeds available decryption key size for contact '%s'\n",
+            contact_name);
+    fclose(keyfile);
+    return -1;
+  }
+  if (meta_rc != 0)
+  {
+    // Nothing decodable to verify: every claim the metadata should carry
+    // is unverifiable, which is the all-invalid verdict.
+    fprintf(stderr, "%sFAIL%s\n", fail_red, fail_rst);
+    fprintf(stderr,
+            "%sThe message carries no valid metadata (it is corrupted, out of sync, or was "
+            "produced by an incompatible sender); source_id, seq and offset cannot be "
+            "verified.%s\n",
+            fail_red, fail_rst);
+    fprintf(stderr, "%sRejected: decryption cancelled, no key material was consumed.%s\n",
+            fail_red, fail_rst);
+    fclose(keyfile);
+    return KEYCHAIN_META_BAD_ALL;
+  }
+
+  int bad_source = memcmp(meta.source_id, expected_source, META_SOURCE_LEN) != 0;
+  int bad_seq = meta.seq_oversize || meta.sequence != new_sequence;
+  int bad_offset = meta.off_oversize || meta.offset != range_offset;
+  if (bad_source || bad_seq || bad_offset)
+  {
+    fprintf(stderr, "%sFAIL%s\n", fail_red, fail_rst);
+    if (bad_source)
+      fprintf(stderr,
+              "%sInvalid source_id: the message's source_id does not match this contact's "
+              "decryption key at offset %zu, so it was not produced with the mirror of "
+              "this key at the expected position.%s\n",
+              fail_red, range_offset, fail_rst);
+    if (bad_seq && meta.seq_oversize)
+      fprintf(stderr,
+              "%sInvalid seq: expected message #%zu but the message declares a value too "
+              "large for this build's counters.%s\n",
+              fail_red, new_sequence, fail_rst);
+    else if (bad_seq)
+      fprintf(stderr, "%sInvalid seq: expected message #%zu but the message declares #%zu.%s\n",
+              fail_red, new_sequence, meta.sequence, fail_rst);
+    if (bad_offset && meta.off_oversize)
+      fprintf(stderr,
+              "%sInvalid offset: expected key offset %zu but the message declares a value "
+              "too large for this build's counters.%s\n",
+              fail_red, range_offset, fail_rst);
+    else if (bad_offset)
+      fprintf(stderr, "%sInvalid offset: expected key offset %zu but the message declares %zu.%s\n",
+              fail_red, range_offset, meta.offset, fail_rst);
+    fprintf(stderr, "%sRejected: decryption cancelled, no key material was consumed.%s\n",
+            fail_red, fail_rst);
+    fclose(keyfile);
+    return meta_validation_code(bad_source, bad_seq, bad_offset);
+  }
+
+  // Key bytes spent per message on top of the payload pad: the source_id
+  // chunk plus the metadata's own pad.
+  size_t reserved = META_SOURCE_LEN + meta.meta_len;
+
+  // First consumption of this key - record its head in the spent-heads
+  // registry before anything is spent. See encrypt_with_contact_locked
+  // for why this must fail closed. Runs after validation, so a rejected
+  // message (which spends nothing) leaves no fingerprint behind.
+  if (c->DecryptionKeyOffset == 0 &&
+      spent_head_record(keychain_dir, "dec", c->DecryptionKeyPath) != 0)
+  {
+    fprintf(stderr,
+            "Error: could not record the spent-key fingerprint for contact '%s'; "
+            "aborting before any key material is spent\n",
+            contact_name);
+    fclose(keyfile);
     return -1;
   }
 
@@ -1213,8 +1588,13 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
     if (input_bytes == 0)
       break;
 
-    // Check if we have enough key material
-    if (total_bytes + input_bytes > available_key)
+    // Check if we have enough key material (the source_id chunk and the
+    // metadata pad are already reserved out of this message's range).
+    // Written as a subtraction so it cannot wrap on a key close to
+    // SIZE_MAX: the metadata pad was physically read from the key file,
+    // so reserved <= available_key, and total_bytes never exceeds the
+    // remainder.
+    if (input_bytes > available_key - reserved - total_bytes)
     {
       fprintf(stderr, "Error: Message size exceeds available decryption key size for contact '%s'\n",
               contact_name);
@@ -1274,7 +1654,7 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
 
   if (total_bytes == 0)
   {
-    fprintf(stderr, "Error: No input data provided\n");
+    fprintf(stderr, "Error: The message carries metadata but no payload\n");
     commit_stage_abort(&stage);
     return -1;
   }
@@ -1284,18 +1664,19 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
     return -1;
   }
 
-  size_t new_sequence = c->DecryptedSequence + 1;
-  size_t range_offset = c->DecryptionKeyOffset;
+  // Everything this message spends: source_id chunk + metadata pad +
+  // payload pad, one contiguous key range - the same total the sender
+  // consumed, keeping both sides' offsets in lockstep.
+  size_t total_consumed = reserved + total_bytes;
 
-  // Same delivery-confirmation gate as the encrypt side, and it matters
-  // even more here: decrypting input that is out of order, duplicated or
-  // truncated would XOR against the wrong key range, emit garbage with
-  // exit 0, and destroy the key bytes the real message needs. Confirming
-  // the previous plaintext was correct caps a desynchronized channel at
-  // one bad message instead of a silent cascade.
+  // Same delivery-confirmation gate as the encrypt side. The metadata
+  // validation above already rejected anything out of order, duplicated
+  // or from the wrong source before key was spent; what it cannot know
+  // is whether the PREVIOUS delivered plaintext actually reached and
+  // decoded for its reader - only the operator can vouch for that.
   if (confirm_previous_delivery(contact_name, 0, c->DecryptedSequence,
                                 c->LastMessageReceivedAt, new_sequence,
-                                range_offset, total_bytes) != 0)
+                                range_offset, total_consumed) != 0)
   {
     commit_discard_path(stage.tmp_path);
     return -1;
@@ -1303,7 +1684,7 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
 
   char pending_final_path[600];
   commit_pending_path(keychain_dir, contact_name, "dec", new_sequence,
-                       range_offset, total_bytes, pending_final_path, sizeof(pending_final_path));
+                       range_offset, total_consumed, pending_final_path, sizeof(pending_final_path));
 
   if (commit_publish(stage.tmp_path, pending_final_path) != 0)
   {
@@ -1315,8 +1696,8 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
 
   // Truncate consumed bytes from the key file (streamed - see
   // truncate_key_file)
-  size_t remaining_size = c->DecryptionKeySize - total_bytes;
-  if (truncate_key_file("decryption", c->DecryptionKeyPath, total_bytes, remaining_size) != 0)
+  size_t remaining_size = c->DecryptionKeySize - total_consumed;
+  if (truncate_key_file("decryption", c->DecryptionKeyPath, total_consumed, remaining_size) != 0)
   {
     commit_discard_path(pending_final_path);
     return -1;
@@ -1326,7 +1707,7 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
 
   // Update contact metadata
   c->DecryptedSequence = new_sequence;
-  c->DecryptionKeyOffset = range_offset + total_bytes;
+  c->DecryptionKeyOffset = range_offset + total_consumed;
   c->DecryptionKeySize = remaining_size;
   c->LastMessageReceivedAt = time(NULL);
 
@@ -1354,13 +1735,13 @@ static int decrypt_with_contact_locked(Contact *c, const char *contact_name,
   if (keychain_stdout_is_tty())
     fprintf(stderr, "\n\n");
   {
-    int err_tty = keychain_stderr_is_tty();
+    int rep_tty = keychain_stderr_is_tty();
     fprintf(stderr, "%sUsed %zu bytes from decryption key for contact '%s'%s\n",
-            err_tty ? KEYCHAIN_GREEN : "", total_bytes, contact_name,
-            err_tty ? KEYCHAIN_RESET : "");
+            rep_tty ? KEYCHAIN_GREEN : "", total_consumed, contact_name,
+            rep_tty ? KEYCHAIN_RESET : "");
     fprintf(stderr, "%sRemaining decryption key: %zu bytes%s\n",
-            err_tty ? KEYCHAIN_GREEN : "", c->DecryptionKeySize,
-            err_tty ? KEYCHAIN_RESET : "");
+            rep_tty ? KEYCHAIN_GREEN : "", c->DecryptionKeySize,
+            rep_tty ? KEYCHAIN_RESET : "");
   }
 
   return 0;

@@ -106,7 +106,7 @@ fi
 RC=$?
 if [ $RC -eq 5 ] &&
    grep -q '^enc_sequence=1$' st_out &&
-   grep -q '^enc_key_remaining=3996$' st_out &&
+   grep -q '^enc_key_remaining=3957$' st_out &&
    grep -q '^enc_ack_outstanding=1$' st_out &&
    grep -q '^enc_redelivery_pending=0$' st_out &&
    grep -q '^dec_ack_outstanding=0$' st_out; then
@@ -242,13 +242,13 @@ else
   exit 1
 fi
 
-# a redelivery run exits 3 with the recovered ciphertext, and the status
+# a redelivery run exits 8 with the recovered ciphertext, and the status
 # afterwards drops back to ack-outstanding (exit 5)
 printf 'new input, must be ignored' | OTP_ASSUME_DELIVERED=1 \
   ./bin/otp -c stsend --encrypt > st_c3 2>/dev/null
 RC=$?
-if [ $RC -eq 3 ] && [ "$(wc -c < st_c3 | tr -d ' ')" != "0" ]; then
-  echo "     - ${GREEN}PASS${NC} - redelivery run: exit 3 with the recovered ciphertext"
+if [ $RC -eq 8 ] && [ "$(wc -c < st_c3 | tr -d ' ')" != "0" ]; then
+  echo "     - ${GREEN}PASS${NC} - redelivery run: exit 8 with the recovered ciphertext"
 else
   echo "     ! ${RED}FAIL${NC} - redelivery run broken after --status (exit $RC)"
   exit 1

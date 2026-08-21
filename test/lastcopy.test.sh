@@ -175,9 +175,22 @@ fi
 #  decrypt-side rejection + recovery of the previous plaintext
 # -----------------------------------------------------------------------------
 
+# The incoming message must be a VALID next message (correct source_id,
+# seq and offset): a replayed or garbled one is rejected by the metadata
+# layer before the confirmation gate - and its recovery offer - is ever
+# reached. Build message #3 at the offset the two decrypts above left.
+. test/xor.helper.sh
+LC_P1=$(wc -c < lc_plain1 | tr -d ' ')
+LC_P2=$(wc -c < lc_plain2 | tr -d ' ')
+LC_DC1=$(meta_consumed_len "$LC_P1" 1 0)
+LC_DC2=$(meta_consumed_len "$LC_P2" 2 "$LC_DC1")
+LC_DOFF3=$((LC_DC1 + LC_DC2))
+printf 'a valid third incoming message' > lc_plain_next
+make_cipher lc_k1 "$LC_DOFF3" lc_plain_next 3 "$LC_DOFF3" lc_c_next
+
 rm -f lc_recovered_plain
 OTP_TEST_CONFIRM_ANSWER=n OTP_TEST_RECOVER_ANSWER=y OTP_TEST_RECOVER_PATH=lc_recovered_plain \
-  ./bin/otp -c lcrecv --decrypt < lc_c2 > /dev/null 2> lc_err
+  ./bin/otp -c lcrecv --decrypt < lc_c_next > /dev/null 2> lc_err
 if [ $? -ne 0 ] && cmp -s lc_recovered_plain lc_plain2 && cmp -s .keychain/lcrecv.last_received lc_plain2; then
   echo "     - ${GREEN}PASS${NC} - rejected plaintext recovered byte-exact, copy kept"
 else
@@ -228,7 +241,7 @@ fi
 echo "     Testing redelivery refreshes the copy..."
 
 # Crash AFTER the key is truncated (after_key_publish): key material is
-# spent, so the next run must redeliver the pending ciphertext (exit 3)
+# spent, so the next run must redeliver the pending ciphertext (exit 8)
 # rather than discard it - and must keep it as the .last_sent copy.
 dd if=/dev/urandom of=lc_plain4 bs=80 count=1 2>/dev/null
 OTP_TEST_CRASH_POINT=after_key_publish OTP_ASSUME_DELIVERED=1 \
@@ -236,7 +249,7 @@ OTP_TEST_CRASH_POINT=after_key_publish OTP_ASSUME_DELIVERED=1 \
 printf 'new input, must be ignored' | OTP_ASSUME_DELIVERED=1 \
   ./bin/otp -c lcsend --encrypt > lc_c4 2>/dev/null
 RC=$?
-if [ $RC -eq 3 ] && [ "$(wc -c < lc_c4 | tr -d ' ')" != "0" ] && cmp -s .keychain/lcsend.last_sent lc_c4; then
+if [ $RC -eq 8 ] && [ "$(wc -c < lc_c4 | tr -d ' ')" != "0" ] && cmp -s .keychain/lcsend.last_sent lc_c4; then
   echo "     - ${GREEN}PASS${NC} - redelivered ciphertext kept as .last_sent"
 else
   echo "     ! ${RED}FAIL${NC} - redelivery (exit $RC) did not refresh .last_sent"

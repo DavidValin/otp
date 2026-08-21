@@ -23,16 +23,36 @@
 // bytes it received actually belong to the previous one.
 #define KEYCHAIN_OK 0
 #define KEYCHAIN_ERROR (-1)
-#define KEYCHAIN_REDELIVERED 3
+#define KEYCHAIN_REDELIVERED 8
+
+// Metadata validation exit codes for --decrypt. Every message carries an
+// encrypted metadata block (source_id / seq / offset - see the
+// "Per-message metadata layer" comment in cipher.c); decryption
+// validates it before any key material is consumed and, on mismatch,
+// rejects the message with the exact combination that failed so an
+// integrating program can react without parsing stderr. These are both
+// the internal return values of decrypt_with_contact() and the process
+// exit codes. A message whose metadata cannot even be parsed (garbage,
+// or produced by an incompatible sender) verifies nothing and is
+// rejected as KEYCHAIN_META_BAD_ALL. Note KEYCHAIN_META_BAD_SOURCE
+// shares exit code 1 with generic errors, by design.
+#define KEYCHAIN_META_BAD_SOURCE 1        // invalid source_id
+#define KEYCHAIN_META_BAD_SEQ 2           // invalid seq
+#define KEYCHAIN_META_BAD_OFFSET 3        // invalid offset
+#define KEYCHAIN_META_BAD_SOURCE_SEQ 4    // invalid source_id and seq
+#define KEYCHAIN_META_BAD_ALL 5           // invalid source_id, seq and offset
+#define KEYCHAIN_META_BAD_SEQ_OFFSET 6    // invalid seq and offset
+#define KEYCHAIN_META_BAD_SOURCE_OFFSET 7 // invalid source_id and offset
 
 // Encryption/Decryption operations with contacts
 int encrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 int decrypt_with_contact(const char *contact_name, FILE *input, FILE *output);
 
-// Delivery-confirmation gate. The wire format carries no key-range tag,
-// so within one direction messages are only decryptable if they arrive in
-// order, complete, exactly once - a property only the correspondents can
-// verify, out of band. Before spending key on any message after the first
+// Delivery-confirmation gate. Within one direction messages are only
+// decryptable if they arrive in order, complete, exactly once; the
+// metadata layer rejects violations at decrypt time before key is spent,
+// but only the correspondents can verify, out of band, that the channel
+// itself is still in sync. Before spending key on any message after the first
 // in a direction, the operator is therefore asked on the terminal to
 // confirm the previous message arrived intact; answering anything but
 // yes cancels the operation with no key consumed. Passing 1 here (set

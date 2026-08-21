@@ -349,7 +349,7 @@ fi
 
 # Verify key offset was updated
 OUTPUT=$(./bin/otp --show-contact enctest)
-echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 13"
+echo "$OUTPUT" | grep -q "EncryptionKeyOffset: 52"
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - encryption key offset updated correctly"
 else
@@ -376,7 +376,7 @@ else
 fi
 
 # Verify remaining key size
-EXPECTED_REMAINING=$((1048576 - 13))
+EXPECTED_REMAINING=$((1048576 - 52))
 echo "$OUTPUT" | grep -q "EncryptionKey: \*\*\*\*\*\*\* ($EXPECTED_REMAINING bytes)"
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - remaining encryption key size correct"
@@ -417,7 +417,7 @@ fi
 
 # Verify decryption key offset was updated
 OUTPUT=$(./bin/otp --show-contact dectest)
-echo "$OUTPUT" | grep -q "DecryptionKeyOffset: 13"
+echo "$OUTPUT" | grep -q "DecryptionKeyOffset: 52"
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - decryption key offset updated correctly"
 else
@@ -458,11 +458,14 @@ BIN_BYTES=12345
 dd if=/dev/urandom of=kc_bin_orig bs=$BIN_BYTES count=1 2>/dev/null
 
 ./bin/otp -c binenc --encrypt -y < kc_bin_orig > kc_bin_cipher 2>/dev/null
+# ciphertext = payload + the 23-byte encrypted metadata block (seq 1 and
+# offset 0 both encode in one byte)
+CIPHER_EXPECT=$((BIN_BYTES + 23))
 CIPHER_SIZE=$(wc -c < kc_bin_cipher | tr -d ' ')
-if [ "$CIPHER_SIZE" = "$BIN_BYTES" ]; then
-  echo "     - ${GREEN}PASS${NC} - ciphertext on stdout is exactly the payload size ($BIN_BYTES bytes)"
+if [ "$CIPHER_SIZE" = "$CIPHER_EXPECT" ]; then
+  echo "     - ${GREEN}PASS${NC} - ciphertext on stdout is exactly payload + metadata ($CIPHER_EXPECT bytes)"
 else
-  echo "     ! ${RED}FAIL${NC} - ciphertext is $CIPHER_SIZE bytes, expected exactly $BIN_BYTES"
+  echo "     ! ${RED}FAIL${NC} - ciphertext is $CIPHER_SIZE bytes, expected exactly $CIPHER_EXPECT"
   exit 1
 fi
 
@@ -515,7 +518,7 @@ fi
 
 if [ -z "$TTY_SEP_TESTED" ]; then
   echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
-elif [ "$(dd if=kc_sep_tty_err bs=1 count=2 2>/dev/null | wc -l | tr -d ' ')" = "2" ] && grep -q "Used 5 bytes" kc_sep_tty_err; then
+elif [ "$(dd if=kc_sep_tty_err bs=1 count=2 2>/dev/null | wc -l | tr -d ' ')" = "2" ] && grep -q "Used 45 bytes" kc_sep_tty_err; then
   echo "     - ${GREEN}PASS${NC} - report opens with a blank line when stdout is a terminal"
 else
   echo "     ! ${RED}FAIL${NC} - expected the stderr report to start with \\n\\n on a terminal: $(cat kc_sep_tty_err 2>/dev/null)"
@@ -537,7 +540,7 @@ fi
 
 if [ -z "$KC_TTY_COLOR_TESTED" ]; then
   echo "     - SKIP - no way to allocate a pseudo-terminal on this platform"
-elif grep -aq "${KC_ESC}\[32mUsed 5 bytes" kc_sep_tty_out; then
+elif grep -aq "${KC_ESC}\[32mUsed 45 bytes" kc_sep_tty_out; then
   echo "     - ${GREEN}PASS${NC} - report is rendered in green when stderr is a terminal"
 else
   echo "     ! ${RED}FAIL${NC} - expected a green (ESC[32m) report on a terminal stderr"
@@ -673,7 +676,7 @@ dd if=/dev/urandom of=smallmsg.txt bs=1 count=100 2>/dev/null
 ./bin/otp -c multichunktest --encrypt < smallmsg.txt > multichunk_cipher.bin 2>/dev/null
 
 . test/xor.helper.sh
-xor_with_key multichunk_key.txt smallmsg.txt expected_cipher.bin
+make_cipher multichunk_key.txt 0 smallmsg.txt 1 0 expected_cipher.bin
 
 cmp -s multichunk_cipher.bin expected_cipher.bin
 if [ $? -eq 0 ]; then
@@ -719,7 +722,7 @@ else
 fi
 
 # Verify offset increased by the second message length
-EXPECTED_OFFSET=$((13 + 14))
+EXPECTED_OFFSET=$((52 + 53))
 echo "$OUTPUT" | grep -q "EncryptionKeyOffset: $EXPECTED_OFFSET"
 if [ $? -eq 0 ]; then
   echo "     - ${GREEN}PASS${NC} - offset updated correctly after multiple operations"

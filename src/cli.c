@@ -1,6 +1,6 @@
 /*****************************************************************************\
  *                                                                            *
- *   otp v1.5.1                                                               *
+ *   otp v1.6.0                                                               *
  *                                                                            *
  *    simple but effective one time pad encryption / decryption command       *
  *    that works with stdin/stdout, managing contacts and key material        *
@@ -355,7 +355,7 @@ int main(int argc, char *argv[])
         {"--decrypt",
          "Decrypt stdin to stdout, consuming the contact's decryption key; must accompany --contact <name> (or -c)"},
         {"-y (or --assume-delivered)",
-         "Skip the delivery-confirmation prompt. Ciphertext carries no key-range tag, so each direction's messages must be processed in the exact order sent, complete, exactly once; before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available."},
+         "Skip the delivery-confirmation prompt. Each direction's messages must be processed in the exact order sent, complete, exactly once; the per-message metadata rejects violations at decrypt time before any key is spent, but only the correspondents can confirm, out of band, that a delivered message actually reached its reader - so before spending key on any message after the first, otp asks on the terminal whether the previous message arrived intact, and cancels (keys untouched) unless answered yes. Pass -y (or set OTP_ASSUME_DELIVERED=1) after confirming out of band - required when no terminal is available."},
         {"--status <name> [--porcelain] (or -st)",
          "Report a contact's per-direction state, verified from the disk files themselves (the key file's physical size is the authority, never the metadata alone): messages sent/received, key bytes remaining, metadata consistency, whether an interrupted run left a committed message the next operation will redeliver instead of processing new input, and whether the last sent/received message still awaits delivery confirmation. --porcelain prints stable key=value lines for scripts. Strictly read-only. Exit codes: 0 clean and ready, 4 redelivery pending, 5 delivery confirmation outstanding, 6 key material rolled back (re-key the contact), 1 error."},
         {"--recover-last <name> --sent|--received (or -rl)",
@@ -368,16 +368,16 @@ int main(int argc, char *argv[])
      * Piped output gets the plain line instead. */
     printf("\n\n");
     if (otp_stdout_is_tty())
-      printf("%s otp v1.5.1 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
+      printf("%s otp v1.6.0 - One Time Pad toolkit %s\n", OTP_BLACK_ON_WHITE, OTP_RESET);
     else
-      puts("otp v1.5.1 - One Time Pad toolkit");
+      puts("otp v1.6.0 - One Time Pad toolkit");
     otp_print_wrapped("\nEncrypt and decrypt messages with the one-time pad, the only cipher with proven perfect secrecy. Messages stream from stdin to stdout; the key material lives in a keychain of contacts, each holding one pad per direction. Every operation consumes its key bytes and physically destroys them - crash-safely, so no key range can ever cover two messages, even across interrupted runs.\n\nUses:\n  Encrypt (using keychain):\n    echo \"plain\" | otp -c <contact_name> --encrypt > cipher.txt\n  \n  Decrypt (using keychain):\n    cat cipher.txt | otp -c <contact_name> --decrypt > plain.txt\n  \n  Generate key pair:\n    cat /dev/urandom | otp --new-key-pair <size_in_MB> <part_a_name> <part_b_name>\n    Writes each party's keys into its own directory, named for the correspondent:\n      <part_a_name>_keys/encryption_for_<part_b_name>.key and <part_a_name>_keys/decryption_from_<part_b_name>.key\n      <part_b_name>_keys/encryption_for_<part_a_name>.key and <part_b_name>_keys/decryption_from_<part_a_name>.key\n    Run with no pipe (stdin a terminal), it offers the randomness vault instead of refusing, when the vault holds enough (2x <size_in_MB>, since a pair draws two independent pads).\n  \n  Add randomness to the vault:\n    cat /dev/urandom | otp --add-rand-to-vault <size_in_MB>\n    Appends (or creates) .keychain/_randomness with that much randomness, stored exactly as read.\n\nKeychain Commands:");
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++)
     {
       printf("  %s%s%s\n", hl, cmds[i][0], rs);
       otp_print_wrapped_indented(cmds[i][1], 4);
     }
-    otp_print_wrapped("\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file. --recover-last streams the copy at any time without consuming it.\n\nExternal integration:\n  Programs driving otp need no library: --status answers, from the disk files alone, everything a client must know before its next operation (is a crash-recovery redelivery pending? is the previous message still unconfirmed?), --recover-last re-emits the kept copy for re-transmission or re-delivery, and the -c exit codes (0 processed, 3 redelivered, 1 error) report each operation's outcome. Delivery confirmation stays with the integrating program: pass -y on the next operation once the peer acknowledged the previous message. See the \"External Integrations\" section of README.md for the full send/receive flow.\n");
+    otp_print_wrapped("\nSafety copies:\n  Each keychain encrypt/decrypt keeps an exact copy of its stdout payload at .keychain/<contact>.last_sent (ciphertext) or .keychain/<contact>.last_received (plaintext), so a forgotten redirect cannot lose a message whose key bytes are already destroyed. The copy is removed automatically (no manual cleanup needed) when the next operation in that direction confirms delivery; if delivery is rejected, otp offers to recover the copy to a file. --recover-last streams the copy at any time without consuming it.\n\nExternal integration:\n  Programs driving otp need no library: --status answers, from the disk files alone, everything a client must know before its next operation (is a crash-recovery redelivery pending? is the previous message still unconfirmed?), --recover-last re-emits the kept copy for re-transmission or re-delivery, and the -c exit codes report each operation's outcome: 0 processed, 8 redelivered, 1 error - and on --decrypt, the metadata validation codes 1 invalid source_id, 2 invalid seq, 3 invalid offset, 4 source_id+seq, 7 source_id+offset, 6 seq+offset, 5 all three (a rejected message consumes no key). Delivery confirmation stays with the integrating program: pass -y on the next operation once the peer acknowledged the previous message. See the \"External Integrations\" section of README.md for the full send/receive flow.\n");
     return 0;
   }
 
@@ -691,13 +691,17 @@ int main(int argc, char *argv[])
 
     cleanup_keychain();
 
-    /* Map to a stable exit status. KEYCHAIN_REDELIVERED gets its own,
-     * non-zero code: the command produced valid output, but that output
-     * is a recovered message from an interrupted earlier run and this
-     * invocation's input was NOT processed. A script must be able to tell
-     * that apart from success without parsing stderr. */
-    if (result == KEYCHAIN_REDELIVERED)
-      return KEYCHAIN_REDELIVERED;
+    /* Map to a stable exit status. KEYCHAIN_REDELIVERED (8) gets its
+     * own, non-zero code: the command produced valid output, but that
+     * output is a recovered message from an interrupted earlier run and
+     * this invocation's input was NOT processed. A script must be able
+     * to tell that apart from success without parsing stderr. The
+     * metadata validation codes (1-7, --decrypt only; see cipher.h) pass
+     * through unchanged - they name exactly which of source_id/seq/
+     * offset failed, and guarantee no key material was consumed. All
+     * other failures fold to the generic 1. */
+    if (result > 0)
+      return result;
     return result == KEYCHAIN_OK ? 0 : 1;
   }
 

@@ -17,6 +17,7 @@ When using the one time pad algorithm, it is critical to remember to never reuse
 - **Protection against key reuse via disk commit stages:** every message is staged, `fsync`'d and read back verified before anything is published, and the key file is committed *before* the metadata that could otherwise claim it spent early - see [Stages of one encrypt/decrypt operation](#stages-of-one-encryptdecrypt-operation).
 - **Automatic recovery from a mid-operation crash:** the next call on a contact reconciles any leftover pending artifact against the key file and metadata via a deterministic truth table - never a guess - before doing anything else - see [Recovering from a crash](#recovering-from-a-crash).
 - **Recovery of the last message when delivery isn't acknowledged:** the exact bytes last sent or received are kept in `.last_sent`/`.last_received` until the next confirmed operation, and can be re-emitted at any time with `--recover-last` - see [`--recover-last`: re-emitting the kept safety copies](#--recover-last-re-emitting-the-kept-safety-copies).
+- **Origin and order verification:** every decrypt proves, before a single key byte is spent, that the message really comes from this contact's mirrored key and is exactly the next one expected - replayed, reordered, foreign or corrupted messages are rejected with a distinct exit code per failure combination and the keys untouched. Achieved through an encrypted per-message metadata block: each ciphertext opens with a `source_id` (a 128-bit chunk of the key itself, which only the true correspondent can possess), the message's sequence number and its key offset, and decryption validates all three against its own key state - see [Origin and order verification](#origin-and-order-verification).
 - **Randomness vault:** `--add-rand-to-vault <size_in_MB>` stores a sequential randomness stream at `.keychain/_randomness` - created (mode 0600) on first use, appended to on every call after, not tied to any contact.
 
 ## Index
@@ -30,6 +31,7 @@ When using the one time pad algorithm, it is critical to remember to never reuse
   - [The `.keychain/` directory](#the-keychain-directory)
   - [Stages of one encrypt/decrypt operation](#stages-of-one-encryptdecrypt-operation)
 - [One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)
+- [Origin and order verification](#origin-and-order-verification)
 - [Accidental mid-crash protection](#accidental-mid-crash-protection)
   - [One Time Pad encryption](#one-time-pad-encryption)
   - [One Time Pad decryption](#one-time-pad-decryption)
@@ -234,7 +236,7 @@ Everything here is created `0600` (the directory `0700`), key material included,
 
 ### Stages of one encrypt/decrypt operation
 
-What follows is the actual order of operations in `encrypt_with_contact()` / `decrypt_with_contact()` (`src/keychain.c`), down to the individual `src/commit.c` primitives. The two directions are the same code path with `enc`/`dec` substituted; the only differences are noted at the end. The design rationale for the ordering is in "Crash-safe key consumption" below - this is the mechanical version.
+What follows is the actual order of operations in `encrypt_with_contact()` / `decrypt_with_contact()` (`src/cipher.c`), down to the individual `src/commit.c` primitives. The two directions are the same code path with `enc`/`dec` substituted; the only differences are noted at the end. The design rationale for the ordering is in "Crash-safe key consumption" below - this is the mechanical version.
 
 **Phase 1 - Acquire (`encrypt_with_contact`)**
 
@@ -249,15 +251,15 @@ Everything below runs under the lock, in `encrypt_with_contact_locked()`.
 **Phase 2 - Reconcile**
 
 6. `commit_reconcile()` - one `opendir(.keychain)` pass that unlinks any `<contact>_<dir>_pending.<pid>.tmp` (abandoned staging: unverified, no recoverable meaning) and locates a published `<contact>_<dir>_pending_seq<N>_off<O>_len<L>.bin`. Only if such an artifact exists does it then `otp_file_size()` the key file and weigh that, the `.meta` values, and the artifact's own filename tag against the three-window truth table. With no artifact - the normal case - it returns immediately.
-7. On `FINISH`: apply the corrected offset/size/sequence and `save_contact_meta()`. On `FINISH` or `DELIVER`: `deliver_pending_file()`, `commit_discard_path()`, **return `KEYCHAIN_REDELIVERED` (exit 3)** - this run's input is deliberately not read.
+7. On `FINISH`: apply the corrected offset/size/sequence and `save_contact_meta()`. On `FINISH` or `DELIVER`: `deliver_pending_file()`, `commit_discard_path()`, **return `KEYCHAIN_REDELIVERED` (exit 8)** - this run's input is deliberately not read.
 8. `resync_key_size()` - `otp_file_size()` the key file against the `.meta` size. Smaller means the metadata is behind: adopt the file's size, report it, `save_contact_meta()`. Larger means key material was rolled back - **abort**, its leading bytes are already spent.
 
 **Phase 3 - Produce (nothing is committed yet)**
 
-9. `fopen(<contact>_<dir>.key, "rb")` - always from byte 0. The file *is* the unconsumed key; there is no seek-to-offset.
-10. `malloc` two 4MB buffers, then `commit_stage_open()` - `unlink` + `open(<contact>_<dir>_pending.<pid>.tmp, O_CREAT|O_EXCL, 0600)`, CRC32 state initialised.
+9. `fopen(<contact>_<dir>.key, "rb")` - always from byte 0. The file *is* the unconsumed key; there is no seek-to-offset. The first 16 bytes read are the message's source_id chunk - embedded (encrypted) in the metadata, never used as pad (see [Origin and order verification](#origin-and-order-verification)). On encrypt, the metadata block (source_id, sequence, offset) is built here. On decrypt, it is instead read from the front of the input, decrypted with the pad bytes that follow the chunk, and validated against the expected source_id/sequence/offset - **any mismatch rejects the message right here**, with its distinct exit code, before anything is staged or a single key byte is spent.
+10. `malloc` two 4MB buffers, then `commit_stage_open()` - `unlink` + `open(<contact>_<dir>_pending.<pid>.tmp, O_CREAT|O_EXCL, 0600)`, CRC32 state initialised. On encrypt, the encrypted metadata block is the staging file's first write.
 11. Loop until `fread(input)` returns 0:
-    - **bounds check** `total + input_bytes > available_key` → abort before any XOR. This is what stops a multi-chunk message from emitting chunks it cannot finish;
+    - **bounds check** `input_bytes > available_key - reserved - total` (`reserved` = the 16-byte source_id chunk plus the metadata pad, both part of this message's key range) → abort before any XOR. This is what stops a multi-chunk message from emitting chunks it cannot finish;
     - `fread` the same number of key bytes; a short read aborts;
     - XOR in place;
     - `commit_stage_write()` - append to the staging file and fold into the CRC32. **This is the only sink**; nothing reaches `output` in this loop;
@@ -266,10 +268,10 @@ Everything below runs under the lock, in `encrypt_with_contact_locked()`.
 
 **Phase 4 - Commit (ordering is load-bearing)**
 
-14. `commit_pending_path()` - compose the name tagging the exact range: sequence `EncryptedSequence + 1`, offset `EncryptionKeyOffset`, length `total_bytes`.
+14. `commit_pending_path()` - compose the name tagging the exact range: sequence `EncryptedSequence + 1`, offset `EncryptionKeyOffset`, length = the message's full consumed range (source_id chunk + metadata pad + payload pad).
 15. `commit_publish()` - `otp_rename_replace()` the staging file to that name, then `fsync` the containing directory so the rename survives power loss and not just a kill (POSIX; a no-op on Windows, which has no directory handle to sync). The message now exists durably, tagged, but **no key is declared spent**. `[crash point: after_pending_publish]`
 16. `truncate_key_file()` - `otp_fseek()` past the consumed prefix, stream the remainder in 4MB chunks through a fresh `CommitStage` into `<contact>_<dir>.key.tmp`, `commit_stage_close_verified()` it, then `commit_publish()` it over the real key file. The consumed bytes are now physically gone. `[crash point: after_key_publish]`
-17. Update the in-memory contact: sequence, offset `+= total_bytes`, size `= remaining`, timestamp.
+17. Update the in-memory contact: sequence, offset advanced by the full consumed range, size `= remaining`, timestamp.
 18. `save_contact_meta()` - build the whole file in memory, `commit_write_verified()` it to `<contact>.meta.tmp` (write → `fsync` → reopen → **byte-for-byte `memcmp`**), then `commit_publish()`. `[crash point: after_keychain_save]`
 
 Steps 15, 16 and 18 are the only three durable state changes, and they happen in that order. Reversing 16 and 18 would let a crash leave the metadata calling a range spent while the key file still physically held those exact reusable bytes.
@@ -284,7 +286,7 @@ Steps 15, 16 and 18 are the only three durable state changes, and they happen in
 
 The same four outcomes cover an I/O failure as well as a crash: a `.meta` write that fails after the key file is already committed leaves exactly the between-16-and-18 state, and recovers identically.
 
-**Decrypt differs in exactly one way:** the artifact holds plaintext rather than ciphertext - which is why staging it before spending key matters more, not less, since a lost plaintext cannot be recomputed once its key bytes are gone - and `LastMessageReceivedAt` is stamped instead of `LastMessageSentAt`.
+**Decrypt differs in three ways:** the metadata block at the front of the input is validated in step 9 and stripped, so the artifact holds only the recovered plaintext payload rather than ciphertext - which is why staging it before spending key matters more, not less, since a lost plaintext cannot be recomputed once its key bytes are gone; the spent-heads fingerprint is recorded only after that validation passes, so a rejected message leaves no trace anywhere; and `LastMessageReceivedAt` is stamped instead of `LastMessageSentAt`.
 
 ## One Time Pad algorithm requirements
 
@@ -295,7 +297,57 @@ The one-time pad is the only encryption scheme with a proof of perfect secrecy, 
 
 Requirement 1 is a property of how the key is generated, and is outside this tool's control beyond `--new-key-pair`. Requirement 2 is a property of how the key is *consumed*, and is what everything below exists to enforce.
 
-Requirement 2 also has a transport-side corollary the tool cannot verify by itself: ciphertext carries no key-range tag, so within one direction messages must be decrypted in the exact order they were sent, complete, exactly once. A message lost, reordered, duplicated or truncated in transit would make the next decrypt use the wrong key range - emitting garbage with exit code 0 while destroying the key bytes the real messages needed. Only the correspondents can confirm delivery, out of band, so `otp` makes that an enforced checkpoint: before spending key on any message after a direction's first, it asks on the terminal (never on `stdin`, which carries the message itself) whether the previous message in that direction - identified by its sequence number, date, and key offset - arrived and decoded correctly, and cancels with the keys untouched unless answered yes. Once you have confirmed out of band, pass `-y`/`--assume-delivered` (or set `OTP_ASSUME_DELIVERED=1`) to skip the prompt; scripts must do so explicitly, because with no terminal to ask on the operation fails closed rather than assuming delivery. Crash-recovery redelivery is never gated - it re-emits already-committed output and consumes no new key.
+Requirement 2 also has a transport-side corollary: within one direction messages must be decrypted in the exact order they were sent, complete, exactly once. Two mechanisms enforce it from opposite ends. On the receiving end, every message carries an encrypted metadata block (see [Origin and order verification](#origin-and-order-verification)) that the decrypt validates against its own key state *before* any key is spent - a message that is lost, reordered, duplicated, truncated or from the wrong source is rejected with a distinct exit code and the keys untouched, instead of silently XORing against the wrong key range. What the tool still cannot know is whether the *previous* delivered message actually reached and decoded for its reader - only the correspondents can confirm delivery, out of band - so `otp` makes that an enforced checkpoint: before spending key on any message after a direction's first, it asks on the terminal (never on `stdin`, which carries the message itself) whether the previous message in that direction - identified by its sequence number, date, and key offset - arrived and decoded correctly, and cancels with the keys untouched unless answered yes. Once you have confirmed out of band, pass `-y`/`--assume-delivered` (or set `OTP_ASSUME_DELIVERED=1`) to skip the prompt; scripts must do so explicitly, because with no terminal to ask on the operation fails closed rather than assuming delivery. Crash-recovery redelivery is never gated - it re-emits already-committed output and consumes no new key.
+
+## Origin and order verification
+
+Before a single key byte is spent, every decrypt verifies that the incoming message really was produced with the mirror of this contact's key - at exactly the expected position - and that it is exactly the next message expected in this direction. A replayed, reordered, foreign, truncated or corrupted message is rejected with the keys untouched and a distinct exit code naming what failed.
+
+This is achieved through a per-message metadata layer: a small binary metadata block, itself encrypted, prepended to the plaintext before the XOR pass. Tags, length fields and values are all raw binary, so the overhead is typically 23 bytes of ciphertext plus the 16-byte source_id chunk:
+
+```
+0x01 <source_id: 16 bytes>             a chunk of the key itself
+0x02 <len: varint> <seq: len bytes>    message sequence number, big-endian
+0x03 <len: varint> <off: len bytes>    absolute key offset, big-endian
+<plaintext...>
+```
+
+The length field is a ULEB128 varint (7 value bits per byte, high bit set on every byte except the last), so `seq` and `off` may be of **any byte-length**: a value up to 127 bytes wide needs a single length byte, wider values grow the length field itself. Values are written with the minimal number of bytes, so this build (whose counters are 64-bit) emits 1-8 value bytes behind a one-byte length - but the parser accepts any width, streaming arbitrarily wide values in constant memory. A well-formed value too wide to ever equal this build's expected seq/offset fails that field's validation with its own exit code below; it is not treated as a malformed message.
+
+The key range one message consumes is one contiguous run starting at the sender's current offset `off`:
+
+```
+[off,       off + 16)       the source_id chunk - embedded (encrypted) in the
+                            metadata, never used as pad
+[off + 16,  off + 16 + N)   the XOR pad for the N = metadata + plaintext bytes
+```
+
+Both sides therefore consume exactly `N + 16` key bytes per message, and the source_id doubles as proof of origin: it is the very key material the receiver's mirrored decryption key holds at that same position, and it is destroyed on both sides with the rest of the message's range.
+
+### Validation on decrypt
+
+Before any key is spent - before anything is staged, delivered or truncated - the decrypt validates the metadata against its own key state:
+
+1. **source_id** must equal the decryption key's own next 16 bytes (the chunk at the expected offset), proving the message was produced with the mirror of this exact key at this exact position.
+2. **seq** must be exactly the next sequence number this contact expects.
+3. **offset** must be exactly this contact's current key offset.
+
+A message that fails any check is rejected: the failure reasons are printed to `stderr` (with `FAIL`, in red on a terminal), **no key material is consumed**, nothing is written to `stdout`, and the process exits with the code naming the exact combination that failed:
+
+| Exit code | Invalid fields |
+|-----------|----------------|
+| `1` | source_id |
+| `2` | seq |
+| `3` | offset |
+| `4` | source_id and seq |
+| `7` | source_id and offset |
+| `6` | seq and offset |
+| `5` | source_id, seq and offset |
+
+A message whose metadata cannot even be parsed verifies nothing and is rejected with exit `5`: garbage, a truncated fragment, ciphertext from an incompatible or pre-metadata sender, an empty message, and input that fails with a read error before the metadata is complete all land here - fewer bytes than a metadata block means there is nothing to verify, so nothing is ever decrypted blindly. Note that exit `1` is shared with generic errors, and a crash-recovery redelivery exits `8`.
+
+On success the metadata is stripped: the delivered plaintext is byte-for-byte the original message.
+
 
 ## Accidental mid-crash protection
 
@@ -318,7 +370,7 @@ Below is each stage of an operation, the accident that can occur at that exact p
 | 4. Ordering (16 before 18) | If metadata were committed first, a crash between the two would leave it declaring a range spent while the key file still physically held those exact bytes - unread, and reusable by the next run. | Key file first, always. The reverse crash is then merely a stale record, never a live reuse hole. |
 | 4. Save metadata (18) | Crash during the metadata write leaves a truncated `.meta` and an unreadable contact. | Built entirely in memory, written to `.meta.tmp`, fsynced, reopened and compared byte-for-byte, then atomically renamed. The live `.meta` only ever transitions between two complete versions. |
 | 5. Deliver (19) | Broken pipe, full disk, or a crash while streaming to `stdout` - after the key has already been consumed. Naively, the message is gone and the key with it. | Both commits are already durable and the verified artifact is still on disk. The next run detects a fully-committed state and redelivers it byte-identically. Delivery is retryable precisely because it happens last. |
-| 5. Redelivery | The redelivering run was also given fresh input on `stdin`. Processing both would blur which message was actually sent. | A recovering run redelivers *only*, never also encrypting new input, and exits `3` instead of `0` so a script cannot mistake it for having sent its own message. |
+| 5. Redelivery | The redelivering run was also given fresh input on `stdin`. Processing both would blur which message was actually sent. | A recovering run redelivers *only*, never also encrypting new input, and exits `8` instead of `0` so a script cannot mistake it for having sent its own message. |
 
 ### One Time Pad decryption
 
@@ -332,7 +384,7 @@ Decryption runs the identical protocol, but the stakes at one specific point are
 | 3. Verify (13) | The recovered plaintext is written but not durably or correctly on disk when the key is about to be destroyed. | Same fsync-and-read-back verification - and here it is the difference between a recoverable message and a permanently lost one. |
 | 4. Commit (15-18) | **The defining case:** a crash after the decryption key bytes are consumed but before the plaintext is safe on disk. The ciphertext alone is now undecryptable forever, because the key that produced it no longer exists on either side. | The plaintext is staged, fsynced, verified and published *before* any key is declared spent. The worst a crash can do is require a redelivery, never a loss. |
 | Aborted staging | A process killed mid-decrypt leaves a partial staging file that contains real recovered plaintext sitting in `.keychain/`. | Abandoned `<contact>_dec_pending.<pid>.tmp` files are swept by the next operation on that contact and direction, and removing a contact deletes every trace of its staged content. |
-| 5. Deliver (19) | Crash or broken pipe while writing plaintext to `stdout`, after the key is gone. | The verified plaintext is still on disk; the next run redelivers it exactly, and exits `3` so the caller knows its own input was not processed. |
+| 5. Deliver (19) | Crash or broken pipe while writing plaintext to `stdout`, after the key is gone. | The verified plaintext is still on disk; the next run redelivers it exactly, and exits `8` so the caller knows its own input was not processed. |
 
 ### What this does not cover
 
@@ -398,7 +450,7 @@ Two independent keys remove that problem by construction. The outgoing and incom
 
 - Alice can send while Bob is sending. Messages may cross in flight; neither consumes key material the other is using.
 - Neither machine ever waits for or is even aware of the other's activity. There is **no protocol-level coordination between the two machines at all** - not even a shared counter.
-- The independence is between the two *directions*, not within one: ciphertext carries no key-range tag, so each direction's messages must still be decrypted in the exact order they were sent, complete, exactly once. That in-order property is what the delivery-confirmation prompt (see [One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)) makes each operator vouch for before more key is spent.
+- The independence is between the two *directions*, not within one: each direction's messages must still be decrypted in the exact order they were sent, complete, exactly once. [Origin and order verification](#origin-and-order-verification) rejects violations at decrypt time before any key is spent, and the delivery-confirmation prompt (see [One Time Pad algorithm requirements](#one-time-pad-algorithm-requirements)) makes each operator additionally vouch for the previous message before more key is spent.
 
 The only serialization is local and brief: on one machine, concurrent operations on the *same* contact take that contact's `.lock` (see [Per-contact locking](#per-contact-locking)), so two processes cannot draw from the same key file at once. Operations on *different* contacts share nothing and run fully in parallel.
 
@@ -486,8 +538,8 @@ otp --show-contact bob
 - **Backup:** Back up the `.keychain/` directory securely if needed
 - **Contact names:** a contact's name is used verbatim as a filename, so names may not be `.` or `..`, contain a path separator (`/` or `\`), any of `: * ? " < > | =`, or control characters. Anything else - spaces, dots, non-ASCII - is fine
 - **Key exhaustion:** Monitor key sizes with `--show-contact` to know when to generate new keys
-- **Large keys:** Supports keys up to 1TB through streaming architecture - no RAM limitations. Every step that touches a key file streams it in fixed-size chunks, including the truncation that follows each message, so peak memory does not scale with key size
-- **Exit codes for `-c`:** `0` success, `3` a recovered message from an interrupted earlier run was redelivered and **this run's input was not processed** (re-run to send it), any other non-zero value an error
+- **Large keys:** Supports keys up to 1TB through streaming architecture - no RAM limitations. Every step that touches a key file streams it in fixed-size chunks, including the truncation that follows each message, so peak memory does not scale with key size. The 1TB range applies to 64-bit builds; a 32-bit build can only address key files up to 4GiB minus one byte, and refuses a larger one with an explicit "too large for this build" error before any key is spent (never by mis-measuring it - large-file support is compiled in, so even a 32-bit build stats big files correctly). The limit is per build, not per keychain: the same keychain files work on a 64-bit build up to the full 1TB
+- **Exit codes for `-c`:** `0` success, `8` a recovered message from an interrupted earlier run was redelivered and **this run's input was not processed** (re-run to send it), `1`-`7` on `--decrypt` a metadata validation failure (see [Origin and order verification](#origin-and-order-verification); no key material is consumed), any other non-zero value an error
 
 ## Crash-safe key consumption
 
@@ -512,7 +564,7 @@ Every encrypt/decrypt call first checks for a leftover pending artifact from an 
 | Situation on disk | What it means | Recovery action |
 |---|---|---|
 | Key file size unchanged, `.meta` offset unchanged | Crash before either commit - nothing was ever spent or delivered | Discard the pending file. No key material lost. |
-| Key file already shrunk by the pending file's length, `.meta` still stale | Crash between the two commits | Finish the `.meta` update using the range recorded in the pending file's own name - not a guess, the exact numbers it was tagged with - then redeliver. |
+| Key file already shrunk by the length recorded in the pending file's name, `.meta` still stale | Crash between the two commits | Finish the `.meta` update using the range recorded in the pending file's own name - not a guess, the exact numbers it was tagged with - then redeliver. |
 | Key file and `.meta` both already reflect the range | Fully committed, only delivery/cleanup was missed | Redeliver the pending file as-is. |
 | None of the above | The artifact's recorded range cannot be reconciled with the key file and the metadata | Discard it without redelivering, and say so. Guessing which range was really spent is the one thing recovery must never do; the run then proceeds normally from the state that *is* known. |
 | The key file cannot be read at all | Nothing can be concluded either way - and the failure may be transient (a mount hiccup, fd exhaustion) | Keep the artifact and abort the run, and say so. On the decrypt side the artifact is the *only* copy of the recovered plaintext - its key bytes are already gone - so discarding it over an unreadable key file would turn a transient failure into permanent message loss. A later run reconciles it normally once the key file is readable again; the run must abort rather than proceed, since staging new output next to the kept artifact would create the "more than one artifact" state below. |
@@ -528,7 +580,7 @@ Run the command again to encrypt new input.
 
 When recovery redelivers a pending message, that invocation does **only** that - it never also processes new input from the same run, so there's no ambiguity about what was actually sent. Run the command again afterward for anything new.
 
-Because that run produced valid output while leaving its input entirely unprocessed, it exits **`3`**, not `0`. A script that treated it as success would believe its message had been encrypted when the bytes it received actually belong to a different one; the distinct code lets it detect and retry without parsing `stderr`.
+Because that run produced valid output while leaving its input entirely unprocessed, it exits **`8`**, not `0`. A script that treated it as success would believe its message had been encrypted when the bytes it received actually belong to a different one; the distinct code lets it detect and retry without parsing `stderr`.
 
 ### Why decrypt needs this even more than encrypt
 
@@ -563,19 +615,19 @@ Each operation now compares the two before spending any key, and resolves the di
 
 ### Known limitations
 
-- **Delivery is not byte-resumable:** if a crash interrupts the final delivery step partway through writing to `stdout`, recovery redelivers the message from the beginning. Key state stays exactly correct, but a consumer that already received part of the stream will see those bytes twice. The recovery notice on `stderr` and the distinct exit code (`3`) make this detectable rather than silent.
+- **Delivery is not byte-resumable:** if a crash interrupts the final delivery step partway through writing to `stdout`, recovery redelivers the message from the beginning. Key state stays exactly correct, but a consumer that already received part of the stream will see those bytes twice. The recovery notice on `stderr` and the distinct exit code (`8`) make this detectable rather than silent.
 - **Deleted staged files are unlinked, not shredded:** pending artifacts and abandoned staging files are removed with `unlink()`. On a journaling or copy-on-write filesystem, or on flash, their contents may remain recoverable from the underlying media afterwards.
 
 ## External Integrations
 
-A program that wants to send and receive one-time-pad messages does not need `otp` as a library - the command itself is the API. Encrypt/decrypt are pure stdin→stdout filters with distinct exit codes (`0` processed, `3` redelivered, `1` error), the delivery-confirmation gate is scriptable with `-y`, and two read-only query commands - `--status` and `--recover-last` - expose everything else a driving program must know. The process boundary is not a compromise, it is part of the design: each operation's plaintext and key bytes live in an address space that is gone when the call returns, and the crash-safety model (built around "a run was interrupted") keeps its one-process-per-operation shape.
+A program that wants to send and receive one-time-pad messages does not need `otp` as a library - the command itself is the API. Encrypt/decrypt are pure stdin→stdout filters with distinct exit codes (`0` processed, `8` redelivered, `1` error, and per-combination metadata validation codes on `--decrypt` - see [Origin and order verification](#origin-and-order-verification)), the delivery-confirmation gate is scriptable with `-y`, and two read-only query commands - `--status` and `--recover-last` - expose everything else a driving program must know. The process boundary is not a compromise, it is part of the design: each operation's plaintext and key bytes live in an address space that is gone when the call returns, and the crash-safety model (built around "a run was interrupted") keeps its one-process-per-operation shape.
 
 ### The four questions an integrated program must answer
 
 Before its next operation on a contact, an integrated client needs to know, per direction:
 
 1. **Did my last encrypt/decrypt complete?** At operation time the exit code answers this (`0` = staged, CRC-verified on disk, key committed, delivered). After a restart, the same answer is reconstructed from disk by `--status`.
-2. **Will the next operation process my input at all?** If an interrupted run left a *committed* message behind, the next operation redelivers that message (exit `3`) and does **not** read its input. `--status` reports this in advance as `redelivery_pending`.
+2. **Will the next operation process my input at all?** If an interrupted run left a *committed* message behind, the next operation redelivers that message (exit `8`) and does **not** read its input. `--status` reports this in advance as `redelivery_pending`.
 3. **Was the last sent message delivered?** `otp` cannot know this - only the correspondents can, out of band. What `otp` tracks is whether it has been *told*: the `.last_sent` copy exists until the next confirmed operation. `--status` reports that as `ack_outstanding`; the client answers it by passing `-y` once the peer acknowledged.
 4. **Was the last received message handed over intact?** Symmetric, via `.last_received` on the decrypt side.
 
@@ -677,7 +729,7 @@ Requirement 2 of the pad - every key byte used exactly once, ever ([One Time Pad
 
 - **The query commands cannot spend or expose key.** Neither reads a single byte of key material; they read sizes, names and the kept payload copies. Every guard in the write paths - staging, CRC read-back verification, atomic publish, key-file-before-metadata ordering, the reconciliation truth table, the per-contact `flock()`, the fail-closed confirmation gate - runs unchanged, because that code is not modified, only queried.
 - **Re-transmission never re-encrypts.** A lost message is re-sent from the stored ciphertext (the client's copy or `--recover-last --sent`), so no second key range is ever spent on the same plaintext, and the receiver's key position stays aligned whether the original or the retry arrives.
-- **Redelivery is surfaced before it happens.** Exit `3` already prevented a script from mistaking a recovered message for its own; `redelivery_pending` lets the client know *in advance* that its input will not be processed, so it sequences the recovered message first and its new message second - preserving in-order, exactly-once within the direction.
+- **Redelivery is surfaced before it happens.** Exit `8` already prevented a script from mistaking a recovered message for its own; `redelivery_pending` lets the client know *in advance* that its input will not be processed, so it sequences the recovered message first and its new message second - preserving in-order, exactly-once within the direction.
 - **The confirmation gate keeps its meaning.** `-y` remains an assertion the *client* makes from its own ack state, exactly as the interactive "yes" is the operator's. `--status` merely tells the client that the assertion is due (`ack_outstanding=1`); it never makes it. A client that follows the flow - ack before `-y`, `-y` before new key is spent - gives the gate strictly better information than an interactive user guessing from memory.
 
 And the crash-safety picture is provably unchanged: `--status` and `--recover-last` are asserted read-only by the test suite (byte-identical keychain before and after, pending artifacts left untouched), the classification they report is the same code recovery executes, and every pre-existing crash-window, locking, metadata and confirmation test passes unmodified.

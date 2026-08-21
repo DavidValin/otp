@@ -9,13 +9,16 @@ fi
 
 # Delivery-confirmation gate tests.
 #
-# The ciphertext otp emits carries no key-range tag, so within one
-# direction messages are only decryptable if they arrive in the exact
-# order sent, complete, exactly once - a property only the correspondents
-# can verify, out of band. Before spending key on any message after a
-# direction's first, otp therefore asks on the terminal whether the
-# previous message in that direction arrived intact, and cancels the
-# operation - with provably zero key consumed - unless answered yes.
+# Within one direction messages are only decryptable if they arrive in
+# the exact order sent, complete, exactly once. The per-message metadata
+# rejects violations at decrypt time before any key is spent (see
+# test/msgmeta.test.sh), but whether a DELIVERED message actually
+# reached and decoded for its reader is a property only the
+# correspondents can verify, out of band. Before spending key on any
+# message after a direction's first, otp therefore asks on the terminal
+# whether the previous message in that direction arrived intact, and
+# cancels the operation - with provably zero key consumed - unless
+# answered yes.
 # -y/--assume-delivered (or OTP_ASSUME_DELIVERED=1) records that the
 # operator already confirmed out of band; with no terminal and no such
 # flag the gate fails closed rather than assuming delivery.
@@ -30,17 +33,17 @@ rm -rf .keychain
 echo ""
 echo "   - Delivery-confirmation gate"
 
-# helper: ciphertext for PLAINFILE against KEYFILE at offset OFF -> OUT
+# helper: expected ciphertext (metadata + message - see test/xor.helper.sh)
+# for PLAINFILE whose key range starts at byte OFF of KEYFILE; SEQ
+# defaults to 1
 . test/xor.helper.sh
 confirm_cipher() {
   KEYFILE=$1
   PLAINFILE=$2
   OFF=$3
   OUT=$4
-  LEN=$(wc -c < "$PLAINFILE" | tr -d ' ')
-  dd if="$KEYFILE" of=confirm_slice.tmp bs=1 skip="$OFF" count="$LEN" 2>/dev/null
-  xor_with_key confirm_slice.tmp "$PLAINFILE" "$OUT"
-  rm -f confirm_slice.tmp
+  SEQ=${5:-1}
+  make_cipher "$KEYFILE" "$OFF" "$PLAINFILE" "$SEQ" "$OFF" "$OUT"
 }
 
 dd if=/dev/urandom of=confirm_key1.txt bs=1 count=1000 2>/dev/null
@@ -57,7 +60,7 @@ echo "     Testing first message needs no confirmation..."
 
 printf 'first message' > confirm_plain1.txt
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm1 --encrypt < confirm_plain1.txt > confirm_c1.bin 2>confirm_err.log
-if [ $? -eq 0 ] && [ "$(wc -c < confirm_c1.bin | tr -d ' ')" = "13" ]; then
+if [ $? -eq 0 ] && [ "$(wc -c < confirm_c1.bin | tr -d ' ')" = "36" ]; then
   echo "     - ${GREEN}PASS${NC} - first message encrypted without prompting"
 else
   echo "     ! ${RED}FAIL${NC} - first message should not require confirmation"
@@ -75,7 +78,7 @@ echo "     Testing prompt fires on the second message and 'y' proceeds..."
 printf 'second here!' > confirm_plain2.txt
 OTP_TEST_CONFIRM_ANSWER=y ./bin/otp -c confirm1 --encrypt < confirm_plain2.txt > confirm_c2.bin 2>confirm_err.log
 STATUS=$?
-if [ $STATUS -eq 0 ] && [ "$(wc -c < confirm_c2.bin | tr -d ' ')" = "12" ]; then
+if [ $STATUS -eq 0 ] && [ "$(wc -c < confirm_c2.bin | tr -d ' ')" = "35" ]; then
   echo "     - ${GREEN}PASS${NC} - second message encrypted after confirmation"
 else
   echo "     ! ${RED}FAIL${NC} - confirmed encrypt failed (exit $STATUS)"
@@ -85,8 +88,8 @@ fi
 
 if grep -q "Confirmation required" confirm_err.log &&
    grep -q "message: #1" confirm_err.log &&
-   grep -q "key consumed up to offset 13" confirm_err.log &&
-   grep -q "key bytes 13-25" confirm_err.log; then
+   grep -q "key consumed up to offset 52" confirm_err.log &&
+   grep -q "key bytes 52-103" confirm_err.log; then
   echo "     - ${GREEN}PASS${NC} - prompt names the previous sequence and the key offsets"
 else
   echo "     ! ${RED}FAIL${NC} - prompt is missing sequence/offset details"
@@ -262,7 +265,7 @@ dd if=/dev/urandom of=confirm_key2.txt.dec bs=1 count=1000 2>/dev/null
 printf 'incoming one' > confirm_din1.txt
 printf 'incoming two' > confirm_din2.txt
 confirm_cipher confirm_key2.txt.dec confirm_din1.txt 0 confirm_dc1.bin
-confirm_cipher confirm_key2.txt.dec confirm_din2.txt 12 confirm_dc2.bin
+confirm_cipher confirm_key2.txt.dec confirm_din2.txt 51 confirm_dc2.bin 2
 
 # first incoming message: no prompt needed
 OTP_TEST_NO_TTY=1 ./bin/otp -c confirm2 --decrypt < confirm_dc1.bin > confirm_dout1.txt 2>confirm_err.log
@@ -328,9 +331,9 @@ OTP_ASSUME_DELIVERED=1 OTP_TEST_CRASH_POINT=after_keychain_save \
 printf 'new input, must be ignored' | OTP_TEST_NO_TTY=1 \
   ./bin/otp -c confirm3 --encrypt > confirm_redelivered.bin 2>confirm_err.log
 STATUS=$?
-if [ $STATUS -eq 3 ] && cmp -s confirm_redelivered.bin confirm_expected6.bin &&
+if [ $STATUS -eq 8 ] && cmp -s confirm_redelivered.bin confirm_expected6.bin &&
    ! grep -q "Confirmation required" confirm_err.log; then
-  echo "     - ${GREEN}PASS${NC} - redelivery ran unprompted with no terminal and exited 3"
+  echo "     - ${GREEN}PASS${NC} - redelivery ran unprompted with no terminal and exited 8"
 else
   echo "     ! ${RED}FAIL${NC} - redelivery must not be gated (exit $STATUS)"
   cat confirm_err.log
